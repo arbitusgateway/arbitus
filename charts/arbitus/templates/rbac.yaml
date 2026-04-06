@@ -1,0 +1,32 @@
+{{- if .Values.kubernetesWatcher.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "arbitus.fullname" . }}-configmap-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbitus.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ .Values.kubernetesWatcher.configMapName | default (include "arbitus.fullname" .) | quote }}
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "arbitus.fullname" . }}-configmap-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arbitus.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "arbitus.fullname" . }}-configmap-watcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "arbitus.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

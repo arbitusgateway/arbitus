@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Kubernetes ConfigMap watcher** (`src/kubernetes.rs`, `src/reload.rs`, `src/config.rs`): Arbitus can now watch a Kubernetes ConfigMap via the K8s API and hot-reload its configuration on every `Apply` event — no `SIGUSR1` or 30-second polling required. Set `kubernetes.configmap_name` in `gateway.yml` to enable. Namespace defaults to the pod's own namespace (read from the projected service-account token). Built as an optional feature (`kubernetes`, enabled by default in the official image) using `kube 0.98` + `kube-runtime`. The Helm chart gains a `kubernetesWatcher` section that automatically provisions the Role + RoleBinding and injects the `kubernetes:` config block. Closes #132.
+
+---
+
 ## [0.19.1] — 2026-04-06
 
 ### Fixed

@@ -36,7 +36,7 @@ Agent (Cursor, Claude, etc.)
 - **OpenAI Tools Bridge** — `/openai/v1/tools` and `/openai/v1/execute` for OpenAI function-calling clients
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — automatic upstream failure isolation with half-open recovery
-- **Config hot-reload** — reload on `SIGUSR1` or automatically every 30 seconds
+- **Config hot-reload** — reload on `SIGUSR1`, automatically every 30 seconds, or event-driven via Kubernetes ConfigMap watcher
 - **Metrics** — Prometheus-compatible `/metrics` endpoint with cost/token estimation
 - **OpenTelemetry** — export traces to any OTLP backend (Jaeger, Tempo, Honeycomb, Datadog)
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering

@@ -1,5 +1,4 @@
 use arbitus::a2a::{A2aPolicyInterceptor, A2aProxyExecutor};
-use arbitus::live_config::OpaPolicy;
 use arbitus::{
     audit::{
         AuditLog,
@@ -15,6 +14,7 @@ use arbitus::{
     hitl::HitlStore,
     jwt::MultiJwtValidator,
     live_config::LiveConfig,
+    live_config::OpaPolicy,
     metrics::GatewayMetrics,
     middleware::{
         Pipeline, auth::AuthMiddleware, hitl::HitlMiddleware, opa::OpaMiddleware,
@@ -22,7 +22,7 @@ use arbitus::{
         schema_validation::SchemaValidationMiddleware,
     },
     oauth::OAuthManager,
-    prompt_injection,
+    prompt_injection, reload,
     schema_cache::SchemaCache,
     secrets::{self, openbao::OpenBaoProvider},
     transport::{
@@ -224,6 +224,8 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
     };
 
     // ── Live config ───────────────────────────────────────────────────────────
+    let kubernetes_cfg = config.kubernetes.clone();
+
     let block_patterns: Vec<Regex> = config
         .rules
         .block_patterns
@@ -261,7 +263,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
     // ── Hot-reload ────────────────────────────────────────────────────────────
     {
         let reload_path = config_path.clone();
-        let tx = config_tx;
+        let tx = config_tx.clone();
         let reload_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
             #[cfg(unix)]
@@ -312,6 +314,17 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 }
             }
         });
+    }
+
+    // ── Kubernetes ConfigMap watcher ──────────────────────────────────────────
+    #[cfg(feature = "kubernetes")]
+    if let Some(k8s_cfg) = kubernetes_cfg {
+        let watcher_metrics = Arc::clone(&metrics);
+        tokio::spawn(arbitus::kubernetes::watch_configmap(
+            k8s_cfg,
+            config_tx,
+            watcher_metrics,
+        ));
     }
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
@@ -1015,44 +1028,9 @@ fn do_reload(
     metrics: &GatewayMetrics,
     last_error: &mut Option<std::time::Instant>,
 ) {
-    match Config::from_file(reload_path) {
-        Ok(new_cfg) => {
-            *last_error = None;
-            let new_patterns: Vec<Regex> = new_cfg
-                .rules
-                .block_patterns
-                .iter()
-                .filter_map(|p| {
-                    Regex::new(p)
-                        .map_err(|e| {
-                            tracing::warn!(pattern = p, error = %e, "invalid regex in reloaded config")
-                        })
-                        .ok()
-                })
-                .collect();
-            let new_injection: Vec<Regex> = if new_cfg.rules.block_prompt_injection {
-                prompt_injection::PATTERNS
-                    .iter()
-                    .filter_map(|p| Regex::new(p).ok())
-                    .collect()
-            } else {
-                vec![]
-            };
-            let new_opa = load_opa_policy(new_cfg.rules.opa.as_ref());
-            let new_live = Arc::new(
-                LiveConfig::new(
-                    new_cfg.agents,
-                    new_patterns,
-                    new_injection,
-                    new_cfg.rules.ip_rate_limit,
-                    new_cfg.rules.filter_mode,
-                    new_cfg.default_policy,
-                )
-                .with_opa_policy(new_opa),
-            );
-            if tx.send(new_live).is_ok() {
-                tracing::info!(path = reload_path, "config reloaded");
-            }
+    match std::fs::read_to_string(reload_path) {
+        Ok(yaml) => {
+            reload::reload_from_yaml(&yaml, tx, metrics, last_error, reload_path);
         }
         Err(e) => {
             metrics.record_config_reload_failure();
@@ -1061,7 +1039,7 @@ fn do_reload(
                 .map(|t| now.duration_since(t).as_secs() >= 5)
                 .unwrap_or(true);
             if should_log {
-                tracing::error!(error = %e, "config reload failed — keeping previous config");
+                tracing::error!(path = reload_path, error = %e, "config reload failed — could not read file");
                 *last_error = Some(now);
             }
         }

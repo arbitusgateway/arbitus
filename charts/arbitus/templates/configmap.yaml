@@ -7,3 +7,11 @@ metadata:
 data:
   gateway.yml: |
     {{- .Values.config.gateway | nindent 4 }}
+    {{- if .Values.kubernetesWatcher.enabled }}
+    kubernetes:
+      configmap_name: {{ .Values.kubernetesWatcher.configMapName | default (include "arbitus.fullname" .) | quote }}
+      {{- if .Values.kubernetesWatcher.namespace }}
+      namespace: {{ .Values.kubernetesWatcher.namespace | quote }}
+      {{- end }}
+      key: {{ .Values.kubernetesWatcher.key | quote }}
+    {{- end }}
