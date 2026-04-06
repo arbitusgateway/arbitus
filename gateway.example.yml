@@ -1,0 +1,63 @@
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000/mcp"
+  session_ttl_secs: 3600
+  # tls:
+  #   cert: "cert.pem"
+  #   key:  "key.pem"
+  #   client_ca: "ca.pem"   # enable mTLS — clients must present a cert signed by this CA
+
+audit:
+  type: sqlite
+  path: "gateway-audit.db"
+  # Fan out to multiple backends:
+  # type: fanout
+  # backends:
+  #   - type: sqlite
+  #     path: "gateway-audit.db"
+  #   - type: webhook
+  #     url: "${AUDIT_WEBHOOK_URL}"
+
+# Named upstreams — reference via `upstream:` in agent policy.
+# upstreams:
+#   filesystem: "http://localhost:3001"
+#   database:   "http://localhost:3002"
+
+agents:
+  cursor:
+    # Route to a specific upstream (optional — defaults to transport.upstream)
+    # upstream: filesystem
+    allowed_tools:
+      - read_file
+      - list_directory
+      - search_files
+    rate_limit: 30
+    # api_key: "${CURSOR_API_KEY}"
+    # mtls_identity: "cursor.internal"   # CN from client TLS certificate
+
+  claude-code:
+    denied_tools:
+      - delete_file
+      - drop_table
+    rate_limit: 60
+    # api_key: "${CLAUDE_CODE_API_KEY}"
+
+auth:
+  # JWT/OIDC — agents authenticated via Bearer token
+  # secret: "${JWT_SECRET}"          # HS256
+  # jwks_url: "https://your-idp/.well-known/jwks.json"  # RS256 via JWKS
+  # agent_claim: "sub"               # JWT claim used as agent name
+
+rules:
+  # ip_rate_limit: 100               # max requests/min per IP (HTTP mode only)
+  block_prompt_injection: true
+  filter_mode: block                 # or: redact
+  block_patterns:
+    - "password"
+    - "private_key"
+    - "api_key"
+    - "Bearer "
+    - "(?i)BEGIN\\s+(RSA\\s+|EC\\s+|OPENSSH\\s+)?PRIVATE\\s+KEY"
+    - "AKIA[0-9A-Z]{16}"            # AWS access key
+    - "ghp_[A-Za-z0-9]{36,}"        # GitHub PAT

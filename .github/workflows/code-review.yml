@@ -1,0 +1,43 @@
+name: AI Code Review
+
+on:
+  workflow_dispatch:  # manual only — disabled on PR to avoid token consumption
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        run: git diff origin/master...HEAD -- '*.rs' '*.toml' '*.yml' '*.yaml' > pr_diff.txt
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are a senior Rust engineer reviewing a pull request for **Arbitus** — a security
+            proxy between AI agents and MCP (Model Context Protocol) servers. It enforces auth,
+            rate limiting, payload filtering, schema validation, and audit logging.
+
+            The diff is in `pr_diff.txt`. Read it, then post a review comment on PR #${{ github.event.pull_request.number }}
+            using: `gh pr comment ${{ github.event.pull_request.number }} --body "YOUR REVIEW HERE"`
+
+            Structure your review with these sections:
+            1. **Summary** — one sentence on what the PR does
+            2. **Correctness** — logic errors, edge cases, race conditions
+            3. **Security** — new attack surface, unsafe patterns, missing validation
+            4. **Performance** — unnecessary allocations, blocking in async context
+            5. **Rust idioms** — error handling, misuse of unwrap/expect
+            6. **Test coverage** — missing cases for changed code
+            7. **Verdict** — Approve / Request Changes / Comment
+
+            Be concise and actionable. If the change looks solid overall, say so.

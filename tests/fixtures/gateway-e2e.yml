@@ -1,0 +1,55 @@
+transport:
+  type: http
+  addr: "127.0.0.1:4001"
+  upstream: "http://127.0.0.1:3000/mcp"
+audits:
+  - type: sqlite
+    path: "e2e-audit.db"
+  - type: webhook
+    url: "http://127.0.0.1:5000/audit"
+auth:
+  secret: "super-secret-key-for-jwt-testing-123"
+  issuer: "arbitus-test-suite"
+  audience: "arbitus-users"
+default_policy:
+  allowed_tools: ["echo"]
+  rate_limit: 10
+agents:
+  cursor:
+    allowed_tools: ["echo", "read_*"]
+    rate_limit: 100
+    tool_rate_limits: { echo: 10 }
+  tester-key:
+    api_key: "secret-key-123"
+    allowed_tools: ["*"]
+    rate_limit: 100
+  tester-trusted:
+    allowed_tools: ["*"]
+    rate_limit: 100
+  approver:
+    allowed_tools: ["*"]
+    approval_required: ["secret_dump"]
+    hitl_timeout_secs: 30
+  governance-tester:
+    allowed_tools: ["*"]
+    timeout_secs: 1
+    shadow_tools: ["shadow_echo"]
+  jwt-tester:
+    allowed_tools: ["*"]
+    rate_limit: 100
+  tool-rate-tester:
+    api_key: "tool-rate-key"
+    allowed_tools: ["*"]
+    rate_limit: 100
+    tool_rate_limits: { echo: 10 }
+rules:
+  block_prompt_injection: true
+  filter_mode: block
+  block_patterns: ["password=[a-zA-Z0-9]+"]
+  ip_rate_limit: 500
+  opa:
+    policy_path: "tests/policy.rego"
+upstreams:
+  default:
+    url: "http://127.0.0.1:3000/mcp"
+    circuit_breaker: { max_failures: 2, reset_timeout_secs: 5 }

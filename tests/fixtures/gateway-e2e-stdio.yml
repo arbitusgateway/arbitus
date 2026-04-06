@@ -1,0 +1,10 @@
+transport:
+  type: stdio
+  server: ["bash", "tests/mock-server.sh"]
+audit:
+  type: sqlite
+  path: "e2e-audit-stdio.db"
+agents:
+  cursor:
+    allowed_tools: ["echo"]
+    rate_limit: 10

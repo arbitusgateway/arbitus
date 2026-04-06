@@ -1,0 +1,17 @@
+target/
+*.db
+*.pem
+*.key
+*.crt
+.github/
+tests/
+assets/
+CHANGELOG.md
+CONTRIBUTING.md
+GEMINI.md
+GROWTH_AND_ADOPTION_STRATEGY.md
+ROADMAP_ENTERPRISE.md
+ROADMAP_SECURITY.md
+STRATEGIC.md
+gateway-stdio.yml
+gateway-test.yml

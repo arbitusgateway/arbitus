@@ -1,0 +1,35 @@
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000/mcp"
+
+agents:
+  test-agent:
+    allowed_tools: ["*"] # Allow all tools — filter tests assert on patterns, not tool policy
+    rate_limit: 1000
+
+rules:
+  block_patterns:
+    # Path traversal & shell
+    - "\\.\\./"
+    - "etc/passwd"
+    - "rm -rf"
+    - "eval\\("
+    # Credentials & secrets
+    - "password"
+    - "private_key"
+    - "(?i)BEGIN\\s+(RSA\\s+|EC\\s+|OPENSSH\\s+)?PRIVATE\\s+KEY"
+    - "AKIA[0-9A-Z]{16}"
+    - "ghp_[A-Za-z0-9]{36,}"
+    - "eyJ[A-Za-z0-9\\-_]{10,}\\.[A-Za-z0-9\\-_]+\\.[A-Za-z0-9\\-_]+"
+    - "(?:postgresql|mysql|mongodb|redis)://[^:]+:[^@]+@"
+    # SSRF
+    - "169\\.254\\.169\\.254"
+    - "metadata\\.google\\.internal"
+    - "\\[::1\\]"
+    # Web attacks
+    - "<script"
+    - "union select"
+    - "javascript:"
+  block_prompt_injection: true
+  filter_mode: block

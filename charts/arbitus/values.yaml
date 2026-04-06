@@ -1,0 +1,165 @@
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/nfvelten/arbitus
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+replicaCount: 1
+
+# ── Gateway config ────────────────────────────────────────────────────────────
+# Rendered verbatim into a ConfigMap mounted at /app/gateway.yml.
+# Use ${VAR} placeholders for secrets — they are resolved from env vars at startup.
+config:
+  gateway: |
+    transport:
+      type: http
+      addr: "0.0.0.0:4000"
+      upstream: "${ARBITUS_UPSTREAM_URL}"
+
+    agents: {}
+
+    rules:
+      block_prompt_injection: true
+      filter_mode: block
+
+    audits:
+      - type: stdout
+
+# ── Environment variables ─────────────────────────────────────────────────────
+# Injected into the arbitus container. Use this to supply secrets referenced
+# via ${VAR} in gateway.yml — e.g. from a Kubernetes Secret.
+#
+# Example — reference an existing Secret:
+#   env:
+#     - name: ARBITUS_UPSTREAM_URL
+#       valueFrom:
+#         secretKeyRef:
+#           name: arbitus-secrets
+#           key: upstream-url
+#     - name: ARBITUS_ADMIN_TOKEN
+#       valueFrom:
+#         secretKeyRef:
+#           name: arbitus-secrets
+#           key: admin-token
+env: []
+
+# Load all keys from an existing Secret as env vars (envFrom).
+# Useful when all ARBITUS_* vars live in a single Secret.
+existingSecret: ""
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 4000
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  # Name of the ServiceAccount to use. Auto-generated from chart fullname when empty.
+  name: ""
+  annotations: {}
+
+# ── Security contexts ─────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 3
+  periodSeconds: 10
+
+# ── Autoscaling ───────────────────────────────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# ── Network Policy ────────────────────────────────────────────────────────────
+# Restricts ingress to pods with the label `arbitus-client: "true"`.
+networkPolicy:
+  enabled: false
+  # Additional ingress rules appended to the generated policy.
+  additionalIngressRules: []
+
+# ── Sidecar pattern ───────────────────────────────────────────────────────────
+# Add extra containers to the Pod (e.g. the AI agent that calls arbitus).
+# These containers share the Pod network — the agent reaches arbitus at localhost:4000.
+#
+# Example:
+#   extraContainers:
+#     - name: my-agent
+#       image: my-org/my-agent:latest
+#       env:
+#         - name: MCP_GATEWAY_URL
+#           value: http://localhost:4000/mcp
+extraContainers: []
+
+# Extra init containers.
+initContainers: []
+
+# Extra volumes and mounts (e.g. TLS certs, custom CA bundles).
+extraVolumes: []
+extraVolumeMounts: []
+
+# ── Audit persistence ─────────────────────────────────────────────────────────
+# When enabled, mounts a PersistentVolumeClaim for the SQLite audit database.
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # existingClaim: ""
+
+# ── Pod annotations and labels ────────────────────────────────────────────────
+podAnnotations: {}
+podLabels: {}
+
+# ── Node scheduling ───────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
+# Should match terminationGracePeriodSeconds to allow audit flush before SIGKILL.
+terminationGracePeriodSeconds: 30

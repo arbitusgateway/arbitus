@@ -1,0 +1,27 @@
+services:
+  gateway:
+    # Use a published release image or build locally:
+    #   image: ghcr.io/nfvelten/arbitus:latest
+    build: .
+    ports:
+      - "4000:4000"
+    volumes:
+      # Mount your own config to override the default
+      - ./gateway.yml:/app/gateway.yml:ro
+      # Persist the SQLite audit log on the host
+      - ./gateway-audit.db:/app/gateway-audit.db
+    environment:
+      # Structured JSON logs — recommended for log aggregators (Loki, Datadog, Elastic)
+      LOG_FORMAT: json
+      # Log verbosity: debug | info | warn | error
+      LOG_LEVEL: info
+      # Inject secrets via env vars instead of hardcoding in gateway.yml:
+      # ARBITUS_ADMIN_TOKEN: "your-secret-token"
+      # ARBITUS_UPSTREAM_URL: "http://mcp-server:3000/mcp"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:4000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

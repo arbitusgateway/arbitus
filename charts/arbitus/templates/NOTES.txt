@@ -1,0 +1,18 @@
+arbitus {{ .Chart.AppVersion }} has been deployed.
+
+Gateway endpoint (within the cluster):
+  http://{{ include "arbitus.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/mcp
+
+Health check:
+  kubectl port-forward svc/{{ include "arbitus.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  curl http://localhost:{{ .Values.service.port }}/health
+
+Metrics (Prometheus):
+  curl http://localhost:{{ .Values.service.port }}/metrics
+
+View logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "arbitus.name" . }} -n {{ .Release.Namespace }} -f
+
+Sidecar pattern — add arbitus to your agent pod by copying the arbitus container spec
+from this Deployment into your own pod template. The agent reaches arbitus at:
+  http://localhost:{{ .Values.service.port }}/mcp
