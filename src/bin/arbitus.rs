@@ -37,7 +37,7 @@ use regex::Regex;
 use rusqlite::{Connection, types::Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::watch;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 // ── CLI definition ─────────────────────────────────────────────────────────────
 
@@ -1198,11 +1198,20 @@ audits: []
 
 // ── OpenTelemetry ──────────────────────────────────────────────────────────────
 
-struct OtelGuard;
+struct OtelGuard {
+    metrics_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    logger_provider: Option<opentelemetry_sdk::logs::LoggerProvider>,
+}
 
 impl Drop for OtelGuard {
     fn drop(&mut self) {
         opentelemetry::global::shutdown_tracer_provider();
+        if let Some(p) = self.metrics_provider.take() {
+            let _ = p.shutdown();
+        }
+        if let Some(p) = self.logger_provider.take() {
+            let _ = p.shutdown();
+        }
     }
 }
 
@@ -1213,35 +1222,64 @@ fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
     let tracer = telemetry.and_then(|tel| match build_otel_tracer(tel) {
         Ok(t) => Some(t),
         Err(e) => {
-            eprintln!("warn: OTel init failed: {e}");
+            eprintln!("warn: OTel traces init failed: {e}");
             None
         }
     });
 
-    let has_otel = tracer.is_some();
+    let metrics_provider =
+        telemetry
+            .filter(|t| t.export_metrics)
+            .and_then(|tel| match build_otel_metrics(tel) {
+                Ok(p) => {
+                    opentelemetry::global::set_meter_provider(p.clone());
+                    Some(p)
+                }
+                Err(e) => {
+                    eprintln!("warn: OTel metrics init failed: {e}");
+                    None
+                }
+            });
 
-    match (json, tracer) {
-        (true, Some(t)) => tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().json())
-            .with(tracing_opentelemetry::layer().with_tracer(t))
-            .init(),
-        (true, None) => tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().json())
-            .init(),
-        (false, Some(t)) => tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .with(tracing_opentelemetry::layer().with_tracer(t))
-            .init(),
-        (false, None) => tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .init(),
+    let logger_provider =
+        telemetry
+            .filter(|t| t.export_logs)
+            .and_then(|tel| match build_otel_logs(tel) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("warn: OTel logs init failed: {e}");
+                    None
+                }
+            });
+
+    let has_traces = tracer.is_some();
+    let otel_trace_layer = tracer.map(|t| tracing_opentelemetry::layer().with_tracer(t));
+    let otel_log_layer = logger_provider
+        .as_ref()
+        .map(opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new);
+
+    let fmt_layer = if json {
+        tracing_subscriber::fmt::layer().json().boxed()
+    } else {
+        tracing_subscriber::fmt::layer().boxed()
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .with(otel_trace_layer)
+        .with(otel_log_layer)
+        .init();
+
+    let any_otel = has_traces || metrics_provider.is_some() || logger_provider.is_some();
+    if any_otel {
+        Some(OtelGuard {
+            metrics_provider,
+            logger_provider,
+        })
+    } else {
+        None
     }
-
-    if has_otel { Some(OtelGuard) } else { None }
 }
 
 fn build_otel_tracer(tel: &TelemetryConfig) -> anyhow::Result<opentelemetry_sdk::trace::Tracer> {
@@ -1267,4 +1305,52 @@ fn build_otel_tracer(tel: &TelemetryConfig) -> anyhow::Result<opentelemetry_sdk:
         .map_err(|e| anyhow::anyhow!("OTLP pipeline: {e}"))?;
 
     Ok(provider.tracer("arbitus"))
+}
+
+fn build_otel_metrics(
+    tel: &TelemetryConfig,
+) -> anyhow::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
+
+    let resource = Resource::new(vec![KeyValue::new(
+        "service.name",
+        tel.service_name.clone(),
+    )]);
+
+    opentelemetry_otlp::new_pipeline()
+        .metrics(opentelemetry_sdk::runtime::Tokio)
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(&tel.otlp_endpoint),
+        )
+        .with_resource(resource)
+        .build()
+        .map_err(|e| anyhow::anyhow!("OTLP metrics pipeline: {e}"))
+}
+
+fn build_otel_logs(
+    tel: &TelemetryConfig,
+) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
+
+    let resource = Resource::new(vec![KeyValue::new(
+        "service.name",
+        tel.service_name.clone(),
+    )]);
+
+    opentelemetry_otlp::new_pipeline()
+        .logging()
+        .with_resource(resource)
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(&tel.otlp_endpoint),
+        )
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .map_err(|e| anyhow::anyhow!("OTLP logs pipeline: {e}"))
 }

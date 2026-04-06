@@ -538,8 +538,8 @@ fn default_agent_claim() -> String {
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 
-/// OpenTelemetry tracing configuration.
-/// When set, spans are exported to the configured OTLP endpoint.
+/// OpenTelemetry configuration.
+/// When set, spans, metrics, and/or logs are exported to the configured OTLP endpoint.
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetryConfig {
     /// OTLP gRPC endpoint (e.g. `http://localhost:4317`).
@@ -547,6 +547,12 @@ pub struct TelemetryConfig {
     /// `service.name` resource attribute. Defaults to `"arbitus"`.
     #[serde(default = "default_service_name")]
     pub service_name: String,
+    /// Export metrics via OTLP alongside the Prometheus `/metrics` endpoint.
+    #[serde(default)]
+    pub export_metrics: bool,
+    /// Export structured logs via OTLP (bridges all `tracing` events).
+    #[serde(default)]
+    pub export_logs: bool,
 }
 
 fn default_service_name() -> String {
@@ -1039,5 +1045,44 @@ mod tests {
             make_agent(Some(vec!["read_*", "list_*"]), vec!["delete_*"], 60),
         );
         assert!(cfg.validate().is_ok());
+    }
+
+    // ── TelemetryConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn telemetry_config_defaults() {
+        let yaml = r#"
+otlp_endpoint: "http://localhost:4317"
+"#;
+        let cfg: TelemetryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.service_name, "arbitus");
+        assert!(!cfg.export_metrics);
+        assert!(!cfg.export_logs);
+    }
+
+    #[test]
+    fn telemetry_config_all_fields() {
+        let yaml = r#"
+otlp_endpoint: "http://otel-collector:4317"
+service_name: "my-service"
+export_metrics: true
+export_logs: true
+"#;
+        let cfg: TelemetryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.otlp_endpoint, "http://otel-collector:4317");
+        assert_eq!(cfg.service_name, "my-service");
+        assert!(cfg.export_metrics);
+        assert!(cfg.export_logs);
+    }
+
+    #[test]
+    fn telemetry_config_partial_flags() {
+        let yaml = r#"
+otlp_endpoint: "http://localhost:4317"
+export_metrics: true
+"#;
+        let cfg: TelemetryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.export_metrics);
+        assert!(!cfg.export_logs);
     }
 }

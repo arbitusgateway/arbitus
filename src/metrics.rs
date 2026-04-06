@@ -1,3 +1,4 @@
+use opentelemetry::{KeyValue, global};
 use prometheus::{Counter, CounterVec, Encoder, Opts, Registry, TextEncoder};
 
 pub struct GatewayMetrics {
@@ -60,6 +61,18 @@ impl GatewayMetrics {
 
     pub fn record(&self, agent: &str, outcome: &str) {
         self.requests.with_label_values(&[agent, outcome]).inc();
+        // Mirror to OTLP when a global meter provider is installed (no-op otherwise).
+        global::meter("arbitus")
+            .u64_counter("arbitus.requests.total")
+            .with_description("Total requests processed by arbitus")
+            .init()
+            .add(
+                1,
+                &[
+                    KeyValue::new("agent", agent.to_string()),
+                    KeyValue::new("outcome", outcome.to_string()),
+                ],
+            );
     }
 
     /// Record estimated token usage for a single request.
@@ -71,11 +84,33 @@ impl GatewayMetrics {
             self.tokens
                 .with_label_values(&[agent, "input"])
                 .inc_by(f64::from(input_tokens));
+            global::meter("arbitus")
+                .f64_counter("arbitus.tokens.total")
+                .with_description("Estimated tokens processed by arbitus")
+                .init()
+                .add(
+                    f64::from(input_tokens),
+                    &[
+                        KeyValue::new("agent", agent.to_string()),
+                        KeyValue::new("direction", "input"),
+                    ],
+                );
         }
         if output_tokens > 0 {
             self.tokens
                 .with_label_values(&[agent, "output"])
                 .inc_by(f64::from(output_tokens));
+            global::meter("arbitus")
+                .f64_counter("arbitus.tokens.total")
+                .with_description("Estimated tokens processed by arbitus")
+                .init()
+                .add(
+                    f64::from(output_tokens),
+                    &[
+                        KeyValue::new("agent", agent.to_string()),
+                        KeyValue::new("direction", "output"),
+                    ],
+                );
         }
     }
 
@@ -132,5 +167,38 @@ mod tests {
         let rendered = m.render();
         assert!(rendered.contains(r#"agent="cursor""#));
         assert!(rendered.contains(r#"agent="claude""#));
+    }
+
+    // ── OTel dual-export (no-op without provider) ─────────────────────────────
+
+    #[test]
+    fn record_does_not_panic_without_otel_provider() {
+        // No global OTel meter provider installed — calls must be silent no-ops.
+        let m = GatewayMetrics::new().unwrap();
+        m.record("cursor", "allowed");
+        m.record("cursor", "blocked");
+        // Prometheus counter still incremented
+        let rendered = m.render();
+        assert!(rendered.contains("arbitus_requests_total"));
+    }
+
+    #[test]
+    fn record_tokens_does_not_panic_without_otel_provider() {
+        let m = GatewayMetrics::new().unwrap();
+        m.record_tokens("cursor", 100, 200);
+        let rendered = m.render();
+        assert!(rendered.contains("arbitus_tokens_total"));
+    }
+
+    #[test]
+    fn prometheus_metrics_unaffected_by_otel_calls() {
+        let m = GatewayMetrics::new().unwrap();
+        m.record("agent-a", "allowed");
+        m.record("agent-a", "allowed");
+        m.record("agent-a", "blocked");
+        let rendered = m.render();
+        // Two allowed + one blocked — Prometheus counters must reflect this.
+        assert!(rendered.contains(r#"outcome="allowed""#));
+        assert!(rendered.contains(r#"outcome="blocked""#));
     }
 }

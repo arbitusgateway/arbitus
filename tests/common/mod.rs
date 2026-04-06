@@ -305,6 +305,24 @@ pub async fn harness_streamable(config_snippet: &str) -> Harness {
     harness_inner(config_snippet, "streamable_http", "type: stdout").await
 }
 
+/// Like `harness` but injects a `telemetry:` section pointing to the given OTLP endpoint.
+pub async fn harness_with_telemetry(
+    config_snippet: &str,
+    otlp_endpoint: &str,
+    export_metrics: bool,
+    export_logs: bool,
+) -> Harness {
+    let telemetry = format!(
+        "telemetry:\n  otlp_endpoint: \"{otlp_endpoint}\"\n  export_metrics: {export_metrics}\n  export_logs: {export_logs}\n"
+    );
+    harness_inner(
+        &format!("{telemetry}{config_snippet}"),
+        "http",
+        "type: stdout",
+    )
+    .await
+}
+
 async fn harness_inner(config_snippet: &str, transport_type: &str, audit_config: &str) -> Harness {
     let (dummy_port, dummy_abort) = start_dummy().await;
     let gw_port = free_port().await;
