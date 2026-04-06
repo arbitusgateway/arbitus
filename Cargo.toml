@@ -1,6 +1,6 @@
 [package]
 name = "arbitus"
-version = "0.19.1"
+version = "1.0.0"
 edition = "2024"
 description = "Security proxy for MCP (Model Context Protocol) — auth, rate limiting, payload filtering, and audit logging between AI agents and MCP servers"
 repository = "https://github.com/nfvelten/arbitus"
