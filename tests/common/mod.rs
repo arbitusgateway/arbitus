@@ -167,6 +167,176 @@ pub async fn start_dummy() -> (u16, tokio::task::AbortHandle) {
     (port, handle.abort_handle())
 }
 
+// ── In-process dummy A2A server ───────────────────────────────────────────────
+
+async fn dummy_a2a(Json(msg): Json<Value>) -> impl IntoResponse {
+    let method = msg["method"].as_str().unwrap_or("");
+    let id = &msg["id"];
+
+    match method {
+        "message/send" => {
+            let input_text = msg["params"]["message"]["parts"]
+                .as_array()
+                .and_then(|parts| parts.iter().find_map(|p| p["text"].as_str()))
+                .unwrap_or("(no text)");
+
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "message": {
+                        "messageId": "resp-1",
+                        "role": "ROLE_AGENT",
+                        "parts": [{ "text": format!("echo: {input_text}") }],
+                        "extensions": []
+                    }
+                }
+            }))
+            .into_response()
+        }
+        _ => Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("unknown method '{method}'") }
+        }))
+        .into_response(),
+    }
+}
+
+/// Start an in-process dummy A2A upstream server. Returns (port, abort_handle).
+pub async fn start_dummy_a2a() -> (u16, tokio::task::AbortHandle) {
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = Router::new().route("/", post(dummy_a2a));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (port, handle.abort_handle())
+}
+
+// ── A2A Harness ───────────────────────────────────────────────────────────────
+
+/// Harness for A2A protocol tests.
+/// The gateway exposes the A2A endpoint at `/a2a`.
+pub struct A2aHarness {
+    pub gw_port: u16,
+    pub client: Client,
+    pub config_path: String,
+    _dummy_a2a: tokio::task::AbortHandle,
+    _dummy_mcp: tokio::task::AbortHandle,
+    _gw: tokio::process::Child,
+}
+
+impl Drop for A2aHarness {
+    fn drop(&mut self) {
+        self._dummy_a2a.abort();
+        self._dummy_mcp.abort();
+        let _ = self._gw.start_kill();
+        let _ = std::fs::remove_file(&self.config_path);
+    }
+}
+
+impl A2aHarness {
+    pub fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", self.gw_port, path)
+    }
+
+    /// POST to the A2A endpoint with a `message/send` request.
+    /// `agent` is sent as the `x-arbitus-agent` header.
+    /// `api_key` is sent as the `x-api-key` header (optional).
+    pub async fn send_message(
+        &self,
+        agent: &str,
+        text: &str,
+        api_key: Option<&str>,
+    ) -> reqwest::Response {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "messageId": "msg-1",
+                    "role": "ROLE_USER",
+                    "parts": [{ "text": text }],
+                    "extensions": []
+                }
+            }
+        });
+        let mut req = self
+            .client
+            .post(self.url("/a2a"))
+            .header("x-arbitus-agent", agent)
+            .json(&body);
+        if let Some(key) = api_key {
+            req = req.header("x-api-key", key);
+        }
+        req.send().await.unwrap()
+    }
+
+    /// GET the agent card from the well-known endpoint.
+    pub async fn agent_card(&self) -> Value {
+        self.client
+            .get(self.url("/a2a/.well-known/agent-card.json"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+}
+
+/// Spin up a gateway binary with an A2A endpoint pointing at a dummy A2A upstream.
+///
+/// The gateway listens on an auto-assigned port with both MCP (`/mcp`) and A2A (`/a2a`).
+/// `agents_config` provides the `agents:` and `rules:` sections.
+pub async fn harness_with_a2a(agents_config: &str) -> A2aHarness {
+    let (a2a_port, dummy_a2a_abort) = start_dummy_a2a().await;
+    let (mcp_port, dummy_mcp_abort) = start_dummy().await;
+    let gw_port = free_port().await;
+
+    let config = format!(
+        r#"transport:
+  type: http
+  addr: "0.0.0.0:{gw_port}"
+  upstream: "http://127.0.0.1:{mcp_port}/mcp"
+  session_ttl_secs: 3600
+audit:
+  type: stdout
+a2a:
+  upstream: "http://127.0.0.1:{a2a_port}"
+  mount: "/a2a"
+  agent_card:
+    name: "Test Agent"
+    description: "Arbitus A2A proxy for tests"
+    url: "http://127.0.0.1:{gw_port}/a2a"
+    version: "1.0.0"
+{agents_config}"#
+    );
+
+    let config_path = format!("/tmp/arbitus-a2a-test-{gw_port}.yml");
+    std::fs::write(&config_path, &config).unwrap();
+
+    let gw = tokio::process::Command::new(GATEWAY_BIN)
+        .arg(&config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    wait_for_port(gw_port).await;
+
+    A2aHarness {
+        gw_port,
+        client: Client::new(),
+        config_path,
+        _dummy_a2a: dummy_a2a_abort,
+        _dummy_mcp: dummy_mcp_abort,
+        _gw: gw,
+    }
+}
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 pub struct Harness {

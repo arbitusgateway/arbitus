@@ -1,3 +1,4 @@
+pub mod a2a;
 pub mod audit;
 pub mod config;
 pub mod cost;

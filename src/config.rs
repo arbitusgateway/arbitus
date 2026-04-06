@@ -34,6 +34,61 @@ pub struct Config {
     /// them into the config before the gateway starts.
     #[serde(default)]
     pub secrets: Option<SecretsConfig>,
+    /// A2A (Agent-to-Agent) protocol endpoint. When present, Arbitus mounts an A2A
+    /// JSON-RPC proxy at `a2a.mount` and enforces per-agent policies on incoming requests.
+    #[serde(default)]
+    pub a2a: Option<A2aConfig>,
+}
+
+// ── A2A ──────────────────────────────────────────────────────────────────────
+
+/// Configuration for the A2A (Agent-to-Agent) protocol endpoint.
+#[derive(Debug, Deserialize, Clone)]
+pub struct A2aConfig {
+    /// URL of the upstream A2A agent (e.g. `"http://localhost:4001"`).
+    pub upstream: String,
+    /// Path at which to mount the A2A router. Default: `/a2a`.
+    #[serde(default = "default_a2a_mount")]
+    pub mount: String,
+    /// Agent card metadata served at `<mount>/.well-known/agent.json`.
+    #[serde(default)]
+    pub agent_card: A2aAgentCardConfig,
+}
+
+/// Metadata for the A2A agent card.
+#[derive(Debug, Deserialize, Clone)]
+pub struct A2aAgentCardConfig {
+    #[serde(default = "default_a2a_name")]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default = "default_a2a_version")]
+    pub version: String,
+}
+
+impl Default for A2aAgentCardConfig {
+    fn default() -> Self {
+        Self {
+            name: default_a2a_name(),
+            description: None,
+            url: None,
+            version: default_a2a_version(),
+        }
+    }
+}
+
+fn default_a2a_mount() -> String {
+    "/a2a".to_string()
+}
+
+fn default_a2a_name() -> String {
+    "Arbitus A2A Proxy".to_string()
+}
+
+fn default_a2a_version() -> String {
+    "1.0.0".to_string()
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -819,6 +874,7 @@ mod tests {
             admin_token: None,
             telemetry: None,
             secrets: None,
+            a2a: None,
         }
     }
 
