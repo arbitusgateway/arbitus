@@ -520,10 +520,131 @@ else fail "Prometheus metrics broken when OTLP is configured"; fi
 kill $OTLP_PID 2>/dev/null || true
 rm -f tests/fixtures/gateway-e2e-otlp.yml
 
+# ── Section 22: A2A Protocol ──────────────────────────────────────────────────
+echo ""
+echo -e "${CYAN}22. A2A Protocol support${NC}"
+
+# Start a minimal A2A upstream that responds to message/send.
+cat << 'EOF' > /tmp/a2a-upstream.py
+import json, sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(length))
+        method = body.get('method', '')
+        rid = body.get('id')
+        if method == 'message/send':
+            parts = body.get('params', {}).get('message', {}).get('parts', [])
+            text = next((p.get('text', '') for p in parts if 'text' in p), '')
+            resp = json.dumps({'jsonrpc':'2.0','id':rid,'result':{'message':{
+                'messageId':'resp-1','role':'ROLE_AGENT',
+                'parts':[{'text':f'a2a-echo: {text}'}],'extensions':[]
+            }}})
+        else:
+            resp = json.dumps({'jsonrpc':'2.0','id':rid,'error':{'code':-32601,'message':'unknown'}})
+        self.send_response(200)
+        self.send_header('Content-Type','application/json')
+        self.end_headers()
+        self.wfile.write(resp.encode())
+
+HTTPServer(('127.0.0.1', 4004), Handler).serve_forever()
+EOF
+python3 /tmp/a2a-upstream.py &
+A2A_UPSTREAM_PID=$!
+sleep 1
+
+cat << 'EOF' > tests/fixtures/gateway-e2e-a2a.yml
+transport:
+  type: http
+  addr: "127.0.0.1:4005"
+  upstream: "http://127.0.0.1:3000/mcp"
+  session_ttl_secs: 3600
+audit:
+  type: stdout
+a2a:
+  upstream: "http://127.0.0.1:4004"
+  mount: "/a2a"
+  agent_card:
+    name: "E2E Test Agent"
+    description: "Arbitus A2A proxy for e2e tests"
+    url: "http://127.0.0.1:4005/a2a"
+    version: "1.0.0"
+agents:
+  cursor:
+    allowed_tools: [echo]
+    rate_limit: 60
+  secured-agent:
+    allowed_tools: [echo]
+    rate_limit: 10
+    api_key: "e2e-key"
+rules:
+  block_patterns:
+    - "private_key"
+EOF
+
+./target/debug/arbitus tests/fixtures/gateway-e2e-a2a.yml > /tmp/arbitus-a2a.log 2>&1 &
+A2A_GW_PID=$!
+
+# Wait for gateway to become healthy.
+for i in $(seq 1 30); do
+  if curl -s http://127.0.0.1:4005/health | grep -q '"status"'; then break; fi
+  sleep 0.2
+done
+
+# Test 22.1 — Agent card served at well-known path.
+CARD=$(curl -s http://127.0.0.1:4005/a2a/.well-known/agent-card.json)
+assert_body "A2A agent card served" "$CARD" "E2E Test Agent"
+
+# Test 22.2 — message/send proxied to upstream.
+A2A_RESP=$(curl -s -X POST http://127.0.0.1:4005/a2a \
+  -H "Content-Type: application/json" \
+  -H "x-arbitus-agent: cursor" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"hello"}],"extensions":[]}}}')
+assert_body "A2A message proxied to upstream" "$A2A_RESP" "a2a-echo: hello"
+
+# Test 22.3 — Missing agent header rejected.
+NO_AGENT=$(curl -s -X POST http://127.0.0.1:4005/a2a \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"message/send","params":{"message":{"messageId":"m2","role":"ROLE_USER","parts":[{"text":"hello"}],"extensions":[]}}}')
+assert_body "A2A missing agent header rejected" "$NO_AGENT" '"error"'
+
+# Test 22.4 — Blocked pattern rejected.
+BLOCKED=$(curl -s -X POST http://127.0.0.1:4005/a2a \
+  -H "Content-Type: application/json" \
+  -H "x-arbitus-agent: cursor" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"message/send","params":{"message":{"messageId":"m3","role":"ROLE_USER","parts":[{"text":"my private_key=AAABBB"}],"extensions":[]}}}')
+assert_body "A2A blocked pattern rejected" "$BLOCKED" '"error"'
+
+# Test 22.5 — API key auth works.
+WITH_KEY=$(curl -s -X POST http://127.0.0.1:4005/a2a \
+  -H "Content-Type: application/json" \
+  -H "x-arbitus-agent: secured-agent" \
+  -H "x-api-key: e2e-key" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"message/send","params":{"message":{"messageId":"m4","role":"ROLE_USER","parts":[{"text":"auth test"}],"extensions":[]}}}')
+assert_body "A2A correct API key passes" "$WITH_KEY" "a2a-echo"
+
+# Test 22.6 — Wrong API key rejected.
+BAD_KEY=$(curl -s -X POST http://127.0.0.1:4005/a2a \
+  -H "Content-Type: application/json" \
+  -H "x-arbitus-agent: secured-agent" \
+  -H "x-api-key: wrong-key" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"message/send","params":{"message":{"messageId":"m5","role":"ROLE_USER","parts":[{"text":"hello"}],"extensions":[]}}}')
+assert_body "A2A wrong API key rejected" "$BAD_KEY" '"error"'
+
+# Test 22.7 — MCP endpoint unaffected.
+MCP_HEALTH=$(curl -s http://127.0.0.1:4005/health)
+assert_body "MCP /health unaffected by A2A config" "$MCP_HEALTH" '"status"'
+
+kill $A2A_GW_PID $A2A_UPSTREAM_PID 2>/dev/null || true
+rm -f tests/fixtures/gateway-e2e-a2a.yml /tmp/a2a-upstream.py /tmp/arbitus-a2a.log
+
 # ── Final summary ──────────────────────────────────────────────────────────────
 echo ""
 if [[ $FAILURES -eq 0 ]]; then
-    echo -e "${MAGENTA}🏆 ALL 21 SECTIONS PASSED${NC}"
+    echo -e "${MAGENTA}🏆 ALL 22 SECTIONS PASSED${NC}"
 else
     echo -e "${RED}✗ $FAILURES ASSERTION(S) FAILED${NC}"
     exit 1
