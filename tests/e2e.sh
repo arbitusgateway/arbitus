@@ -136,9 +136,9 @@ chmod +x tests/mock-server.sh
 # 2. Cleanup
 cleanup() {
     echo -e "\n${YELLOW}🧹 Cleaning up processes and temp files...${NC}"
-    kill $DUMMY_PID $ARBITUS_PID $NODE_PID $STREAMABLE_PID 2>/dev/null || true
-    fuser -k 3000/tcp 4001/tcp 4002/tcp 5000/tcp 2>/dev/null || true
-    rm -rf concurrent_results/ tests/mock-server.sh output-stdio.jsonl tests/fixtures/gateway-hotreload.yml tests/fixtures/gateway-e2e-ip.yml tests/fixtures/gateway-e2e-streamable.yml *.log hitl_resp.txt webhook.log tests/node_helper.js tests/policy.rego tests/fixtures/gateway-verify.yml
+    kill $DUMMY_PID $ARBITUS_PID $NODE_PID $STREAMABLE_PID $OTLP_PID 2>/dev/null || true
+    fuser -k 3000/tcp 4001/tcp 4002/tcp 4003/tcp 5000/tcp 2>/dev/null || true
+    rm -rf concurrent_results/ tests/mock-server.sh output-stdio.jsonl tests/fixtures/gateway-hotreload.yml tests/fixtures/gateway-e2e-ip.yml tests/fixtures/gateway-e2e-streamable.yml tests/fixtures/gateway-e2e-otlp.yml *.log hitl_resp.txt webhook.log tests/node_helper.js tests/policy.rego tests/fixtures/gateway-verify.yml
 }
 trap cleanup EXIT
 
@@ -464,10 +464,66 @@ else fail "invalidated session returned $AFTER_DEL (expected 404)"; fi
 
 kill $STREAMABLE_PID 2>/dev/null || true
 
+echo -e "\n${CYAN}📡 21. OTLP METRICS + LOGS${NC}"
+echo "   Starting gateway with OTLP metrics+logs configured (collector unreachable)..."
+
+cat << 'EOF' > tests/fixtures/gateway-e2e-otlp.yml
+transport:
+  type: http
+  addr: "127.0.0.1:4003"
+  upstream: "http://127.0.0.1:3000/mcp"
+telemetry:
+  otlp_endpoint: "http://127.0.0.1:19999"
+  service_name: "arbitus-e2e"
+  export_metrics: true
+  export_logs: true
+agents:
+  cursor:
+    allowed_tools: ["echo"]
+    rate_limit: 100
+EOF
+
+./target/debug/arbitus tests/fixtures/gateway-e2e-otlp.yml >> arbitus.log 2>&1 &
+OTLP_PID=$!
+
+# Wait for health
+for i in {1..40}; do
+  if curl -s http://127.0.0.1:4003/health | grep -q "ok\|healthy\|status"; then break; fi
+  sleep 0.1
+done
+
+echo "   Testing gateway is healthy with OTLP configured (collector unreachable)..."
+HEALTH=$(curl -s http://127.0.0.1:4003/health)
+if echo "$HEALTH" | grep -qi "ok\|healthy\|status"; then pass "gateway healthy with unreachable OTLP collector"
+else fail "gateway unhealthy with OTLP configured: $HEALTH"; fi
+
+echo "   Testing request handling is unaffected by OTLP config..."
+INIT_RESP=$(curl -s -i -X POST http://127.0.0.1:4003/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1.0"}}}')
+SID=$(echo "$INIT_RESP" | grep -i "mcp-session-id:" | awk '{print $2}' | tr -d '\r')
+if [[ -n "$SID" ]]; then pass "initialize succeeds with OTLP configured"
+else fail "initialize failed with OTLP configured"; fi
+
+ECHO_RESP=$(curl -s -X POST http://127.0.0.1:4003/mcp \
+  -H "Content-Type: application/json" \
+  -H "mcp-session-id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"otlp-e2e"}}}')
+if echo "$ECHO_RESP" | grep -q "echo: otlp-e2e"; then pass "tools/call succeeds with OTLP configured"
+else fail "tools/call failed with OTLP configured: $ECHO_RESP"; fi
+
+echo "   Testing Prometheus /metrics still works alongside OTLP..."
+METRICS=$(curl -s http://127.0.0.1:4003/metrics)
+if echo "$METRICS" | grep -q "arbitus_requests_total"; then pass "Prometheus metrics endpoint intact with OTLP configured"
+else fail "Prometheus metrics broken when OTLP is configured"; fi
+
+kill $OTLP_PID 2>/dev/null || true
+rm -f tests/fixtures/gateway-e2e-otlp.yml
+
 # ── Final summary ──────────────────────────────────────────────────────────────
 echo ""
 if [[ $FAILURES -eq 0 ]]; then
-    echo -e "${MAGENTA}🏆 ALL 20 SECTIONS PASSED${NC}"
+    echo -e "${MAGENTA}🏆 ALL 21 SECTIONS PASSED${NC}"
 else
     echo -e "${RED}✗ $FAILURES ASSERTION(S) FAILED${NC}"
     exit 1

@@ -40,9 +40,10 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.27"
-opentelemetry = { version = "0.26", features = ["trace"] }
-opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.26", features = ["trace", "grpc-tonic"] }
+opentelemetry = { version = "0.26", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.26", features = ["trace", "metrics", "logs", "grpc-tonic"] }
+opentelemetry-appender-tracing = "0.26"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 subtle = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
