@@ -7,12 +7,15 @@ pub mod env_config;
 pub mod gateway;
 pub mod hitl;
 pub mod jwt;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
 pub mod live_config;
 pub mod metrics;
 pub mod middleware;
 pub mod oauth;
 pub mod openai_bridge;
 pub mod prompt_injection;
+pub mod reload;
 pub mod schema_cache;
 pub mod secrets;
 pub mod transport;

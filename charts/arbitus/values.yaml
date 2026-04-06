@@ -163,3 +163,18 @@ affinity: {}
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 # Should match terminationGracePeriodSeconds to allow audit flush before SIGKILL.
 terminationGracePeriodSeconds: 30
+
+# ── Kubernetes ConfigMap watcher ──────────────────────────────────────────────
+# When enabled, Arbitus watches the named ConfigMap via the K8s API and
+# hot-reloads its config on every Apply event — no SIGUSR1 or 30-second
+# polling needed.  Requires the `kubernetes` Cargo feature (on by default in
+# the official image).  Creates a Role + RoleBinding for the ServiceAccount.
+kubernetesWatcher:
+  enabled: false
+  # Name of the ConfigMap to watch.
+  # Defaults to the chart's fullname (the same ConfigMap that holds gateway.yml).
+  configMapName: ""
+  # Namespace of the ConfigMap.  Leave empty to use the pod's own namespace.
+  namespace: ""
+  # Key within ConfigMap.data that contains the gateway YAML.
+  key: "gateway.yml"

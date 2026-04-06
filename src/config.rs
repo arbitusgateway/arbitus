@@ -38,6 +38,12 @@ pub struct Config {
     /// JSON-RPC proxy at `a2a.mount` and enforces per-agent policies on incoming requests.
     #[serde(default)]
     pub a2a: Option<A2aConfig>,
+    /// Kubernetes ConfigMap watcher. When present, Arbitus subscribes to the named
+    /// ConfigMap via the K8s API and hot-reloads config whenever the data changes.
+    /// Requires the binary to be built with the `kubernetes` feature and appropriate
+    /// RBAC (get/list/watch on the ConfigMap).
+    #[serde(default)]
+    pub kubernetes: Option<KubernetesConfig>,
 }
 
 // ── A2A ──────────────────────────────────────────────────────────────────────
@@ -89,6 +95,30 @@ fn default_a2a_name() -> String {
 
 fn default_a2a_version() -> String {
     "1.0.0".to_string()
+}
+
+// ── Kubernetes ───────────────────────────────────────────────────────────────
+
+/// Configuration for the Kubernetes ConfigMap watcher.
+/// When present, Arbitus watches the named ConfigMap via the K8s API and
+/// hot-reloads its config on every `Apply` event — no SIGUSR1 or 30-second
+/// polling needed.
+#[derive(Debug, Deserialize, Clone)]
+pub struct KubernetesConfig {
+    /// Name of the ConfigMap to watch (required).
+    pub configmap_name: String,
+    /// Namespace of the ConfigMap.  Defaults to the pod's own namespace
+    /// (read from `/var/run/secrets/kubernetes.io/serviceaccount/namespace`).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Key within `ConfigMap.data` that contains the gateway YAML.
+    /// Defaults to `"gateway.yml"`.
+    #[serde(default = "default_configmap_key")]
+    pub key: String,
+}
+
+fn default_configmap_key() -> String {
+    "gateway.yml".to_string()
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -747,7 +777,15 @@ impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("could not read '{}': {}", path, e))?;
-        let interpolated = crate::env_config::interpolate_env_vars(&raw)?;
+        Self::from_yaml_str(&raw)
+    }
+
+    /// Parse a `Config` from a YAML string.
+    /// Performs env-var interpolation, env overrides, and validation — identical
+    /// to `from_file` but without the filesystem read.  Used by the Kubernetes
+    /// ConfigMap watcher and any caller that already has the YAML in memory.
+    pub fn from_yaml_str(yaml: &str) -> anyhow::Result<Self> {
+        let interpolated = crate::env_config::interpolate_env_vars(yaml)?;
         let mut config: Self = serde_yaml::from_str(&interpolated)
             .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
         crate::env_config::apply_env_overrides(&mut config);
@@ -875,6 +913,7 @@ mod tests {
             telemetry: None,
             secrets: None,
             a2a: None,
+            kubernetes: None,
         }
     }
 
