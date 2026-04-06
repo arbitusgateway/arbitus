@@ -46,6 +46,7 @@ opentelemetry-otlp = { version = "0.26", features = ["trace", "metrics", "logs",
 opentelemetry-appender-tracing = "0.26"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 subtle = "2"
+ra2a = { version = "0.9.3", features = ["server"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
 percent-encoding = "2"

@@ -1,3 +1,4 @@
+use arbitus::a2a::{A2aPolicyInterceptor, A2aProxyExecutor};
 use arbitus::live_config::OpaPolicy;
 use arbitus::{
     audit::{
@@ -365,6 +366,33 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
         Arc::new(MultiJwtValidator::new(configs))
     });
 
+    // ── A2A server state ──────────────────────────────────────────────────────
+    let a2a_server_state = if let Some(a2a_cfg) = &config.a2a {
+        let executor = A2aProxyExecutor::new(&a2a_cfg.upstream)?;
+        let interceptor = std::sync::Arc::new(A2aPolicyInterceptor::new(config_rx.clone()));
+        let card_cfg = &a2a_cfg.agent_card;
+        let description = card_cfg.description.clone().unwrap_or_default();
+        let endpoint_url = card_cfg
+            .url
+            .clone()
+            .unwrap_or_else(|| a2a_cfg.upstream.clone());
+        let interface = ra2a::types::AgentInterface::new(
+            &endpoint_url,
+            ra2a::types::TransportProtocol::new(ra2a::types::TransportProtocol::JSONRPC),
+        );
+        let mut card = ra2a::types::AgentCard::new(&card_cfg.name, description, vec![interface]);
+        card.version = card_cfg.version.clone();
+        card.documentation_url = Some(endpoint_url);
+        let handler = ra2a::server::HandlerBuilder::new(executor, card.clone())
+            .with_call_interceptor(interceptor)
+            .build();
+        let state = ra2a::server::ServerState::new(std::sync::Arc::new(handler), card);
+        tracing::info!(upstream = %a2a_cfg.upstream, mount = %a2a_cfg.mount, "A2A protocol enabled");
+        Some((a2a_cfg.mount.clone(), state))
+    } else {
+        None
+    };
+
     match config.transport {
         TransportConfig::Http {
             addr,
@@ -388,7 +416,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 config_rx.clone(),
                 schema_cache,
             ));
-            HttpTransport::new(
+            let mut transport = HttpTransport::new(
                 addr,
                 session_ttl_secs,
                 tls,
@@ -399,9 +427,11 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 config.admin_token,
                 hitl_store,
                 oauth_manager,
-            )
-            .serve(gateway)
-            .await?;
+            );
+            if let Some((mount, state)) = a2a_server_state {
+                transport = transport.with_a2a(mount, state);
+            }
+            transport.serve(gateway).await?;
         }
         TransportConfig::StreamableHttp {
             addr,
@@ -425,7 +455,7 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 config_rx.clone(),
                 schema_cache,
             ));
-            StreamableHttpTransport::new(
+            let mut transport = StreamableHttpTransport::new(
                 addr,
                 session_ttl_secs,
                 tls,
@@ -436,9 +466,11 @@ async fn cmd_start(config_path: String) -> anyhow::Result<()> {
                 config.admin_token,
                 hitl_store,
                 oauth_manager,
-            )
-            .serve(gateway)
-            .await?;
+            );
+            if let Some((mount, state)) = a2a_server_state {
+                transport = transport.with_a2a(mount, state);
+            }
+            transport.serve(gateway).await?;
         }
         TransportConfig::Stdio { server, verify } => {
             tracing::info!(server = %server.join(" "), "stdio mode");

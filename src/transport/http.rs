@@ -107,6 +107,8 @@ pub struct HttpTransport {
     /// Operator kill switch — tool names in this set are immediately blocked
     /// regardless of agent policy. Managed via the dashboard UI.
     kill_switch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Optional A2A server state: (mount_path, server_state).
+    a2a: Option<(String, ra2a::server::ServerState)>,
 }
 
 impl HttpTransport {
@@ -135,7 +137,19 @@ impl HttpTransport {
             hitl_store,
             oauth_manager,
             kill_switch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            a2a: None,
         }
+    }
+
+    /// Attach an A2A server state to this transport.
+    /// When set, the A2A router is mounted at `mount_path` alongside the MCP routes.
+    pub fn with_a2a(
+        mut self,
+        mount_path: impl Into<String>,
+        state: ra2a::server::ServerState,
+    ) -> Self {
+        self.a2a = Some((mount_path.into(), state));
+        self
     }
 }
 
@@ -172,7 +186,7 @@ impl Transport for HttpTransport {
             kill_switch: Arc::clone(&self.kill_switch),
         });
 
-        let app = Router::new()
+        let mut app = Router::new()
             .route("/mcp", post(handle_mcp))
             .route("/mcp", get(handle_sse))
             .route("/mcp", delete(handle_delete_session))
@@ -189,6 +203,11 @@ impl Transport for HttpTransport {
             .route("/openai/v1/execute", post(handle_openai_execute))
             .route("/oauth/callback", get(handle_oauth_callback))
             .with_state(state);
+
+        if let Some((mount, a2a_state)) = &self.a2a {
+            app = app.nest(mount, ra2a::server::a2a_router(a2a_state.clone()));
+            tracing::info!(mount, "A2A endpoint enabled");
+        }
 
         if let Some(tls) = &self.tls {
             let mode = if tls.client_ca.is_some() {
@@ -239,6 +258,8 @@ pub struct StreamableHttpTransport {
     hitl_store: Arc<HitlStore>,
     oauth_manager: Arc<OAuthManager>,
     kill_switch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Optional A2A server state: (mount_path, server_state).
+    a2a: Option<(String, ra2a::server::ServerState)>,
 }
 
 impl StreamableHttpTransport {
@@ -267,7 +288,18 @@ impl StreamableHttpTransport {
             hitl_store,
             oauth_manager,
             kill_switch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            a2a: None,
         }
+    }
+
+    /// Attach an A2A server state to this transport.
+    pub fn with_a2a(
+        mut self,
+        mount_path: impl Into<String>,
+        state: ra2a::server::ServerState,
+    ) -> Self {
+        self.a2a = Some((mount_path.into(), state));
+        self
     }
 }
 
@@ -287,7 +319,7 @@ impl Transport for StreamableHttpTransport {
             kill_switch: Arc::clone(&self.kill_switch),
         });
 
-        let app = Router::new()
+        let mut app = Router::new()
             .route("/mcp", post(handle_streamable_post))
             .route("/mcp", get(handle_sse))
             .route("/mcp", delete(handle_delete_session))
@@ -304,6 +336,11 @@ impl Transport for StreamableHttpTransport {
             .route("/openai/v1/execute", post(handle_openai_execute))
             .route("/oauth/callback", get(handle_oauth_callback))
             .with_state(state);
+
+        if let Some((mount, a2a_state)) = &self.a2a {
+            app = app.nest(mount, ra2a::server::a2a_router(a2a_state.clone()));
+            tracing::info!(mount, "A2A endpoint enabled");
+        }
 
         if let Some(tls) = &self.tls {
             let mode = if tls.client_ca.is_some() {
