@@ -378,6 +378,35 @@ mod tests {
         assert!(matches!(mw.check(&ctx).await, Decision::Block { .. }));
     }
 
+    // ── Depth limit ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deeply_nested_json_blocked() {
+        // Build a JSON value nested MAX_DEPTH + 10 levels deep.
+        let mut val = json!("harmless");
+        for _ in 0..(super::MAX_DEPTH + 10) {
+            val = json!({ "x": val });
+        }
+        let re = Regex::new("secret").unwrap();
+        let mw = make_mw(vec![re]);
+        let ctx = ctx_call("echo", val);
+        // Must block (depth guard) rather than panic / overflow.
+        assert!(matches!(mw.check(&ctx).await, Decision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn max_depth_exactly_allowed() {
+        // A payload at exactly MAX_DEPTH levels should still be scanned normally.
+        let mut val = json!("harmless");
+        for _ in 0..super::MAX_DEPTH {
+            val = json!({ "x": val });
+        }
+        let re = Regex::new("secret").unwrap();
+        let mw = make_mw(vec![re]);
+        let ctx = ctx_call("echo", val);
+        assert!(matches!(mw.check(&ctx).await, Decision::Allow { .. }));
+    }
+
     // ── SSRF & Domain Bypass ─────────────────────────────────────────────────
 
     #[tokio::test]
@@ -424,21 +453,52 @@ mod tests {
     }
 }
 
-/// Recursively scan JSON value string leaves with encoding-aware pattern matching.
-/// Returns the pattern string of the first match, or None if clean.
+/// Maximum nesting depth accepted before a payload is treated as a block.
+/// Prevents stack overflow on pathological inputs (e.g. 10 000-level deep JSON).
+const MAX_DEPTH: usize = 64;
+
+/// Iterative scan of all JSON string leaves with encoding-aware pattern matching.
+///
+/// Uses an explicit stack instead of recursion so deeply-nested payloads cannot
+/// overflow the thread stack.  Returns the matching pattern string on the first
+/// hit, or `None` if the payload is clean.  Payloads deeper than `MAX_DEPTH`
+/// are treated as a match so they are blocked without further inspection.
 fn scan_value(val: &Value, patterns: &[regex::Regex]) -> Option<String> {
     if patterns.is_empty() {
         return None;
     }
-    match val {
-        Value::String(s) => patterns
-            .iter()
-            .find(|p| matches_any_variant(s, std::slice::from_ref(p)))
-            .map(|p| p.as_str().to_string()),
-        Value::Array(arr) => arr.iter().find_map(|v| scan_value(v, patterns)),
-        Value::Object(obj) => obj.values().find_map(|v| scan_value(v, patterns)),
-        _ => None,
+
+    // Stack entries: (node, current_depth).
+    let mut stack: Vec<(&Value, usize)> = vec![(val, 0)];
+
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            return Some("[max depth exceeded]".to_string());
+        }
+        match node {
+            Value::String(s) => {
+                if let Some(p) = patterns
+                    .iter()
+                    .find(|p| matches_any_variant(s, std::slice::from_ref(p)))
+                {
+                    return Some(p.as_str().to_string());
+                }
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    stack.push((item, depth + 1));
+                }
+            }
+            Value::Object(obj) => {
+                for v in obj.values() {
+                    stack.push((v, depth + 1));
+                }
+            }
+            _ => {}
+        }
     }
+
+    None
 }
 
 pub struct PayloadFilterMiddleware {

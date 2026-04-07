@@ -4,6 +4,7 @@
 
 ### Fixed
 - **Federation timeout now returns partial results** (`src/gateway.rs`): when `tools/list` is federated across multiple upstreams and the deadline fires, results from upstreams that already responded are now returned instead of discarding everything with an error. The response includes `"_arbitus_partial": true` when not all upstreams replied in time — clients can proceed with the partial tool catalog rather than seeing an empty list. Closes #97.
+- **Stack overflow on deeply nested JSON payloads** (`src/middleware/payload_filter.rs`, `src/gateway.rs`): `scan_value` (payload filter) was fully recursive and would overflow the stack on deeply nested JSON arguments. Replaced with an explicit-stack iterative traversal capped at `MAX_DEPTH = 64`. `redact_value` (gateway) was also recursive; refactored to depth-parameterised recursion that returns the value unchanged beyond `REDACT_MAX_DEPTH = 64` instead of panicking. Added two new unit tests covering the boundary. Closes #95.
 
 ### Changed
 - **Rate limiter replaced with `governor` (GCRA, lock-free)** (`src/middleware/rate_limit.rs`): replaced the custom `Mutex<HashMap<String, Vec<Instant>>>` sliding-window implementation with the `governor` crate (GCRA algorithm). Enforcement is now lock-free (atomics) and O(1) per check — no more O(n) `Vec::retain` on every request, no more background cleanup task, no more TOCTOU race (closes #82 root cause). Adds optional `rate_limit_burst` field on `AgentPolicy` (defaults to `rate_limit` for full backward compatibility). Closes #98.
