@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **SQLite immutable audit triggers** (`src/audit/sqlite.rs`): two `BEFORE UPDATE / BEFORE DELETE` triggers are now installed during schema initialisation, enforcing audit record immutability at the database engine level — zero runtime performance cost. Any attempt to modify or delete a committed audit row is aborted by SQLite regardless of which process or connection issues it. The `no_audit_delete` trigger is skipped when rotation (`max_entries` / `max_age_days`) is configured, since rotation intentionally prunes old rows. Closes #99.
+
 ### Fixed
 - **Federation timeout now returns partial results** (`src/gateway.rs`): when `tools/list` is federated across multiple upstreams and the deadline fires, results from upstreams that already responded are now returned instead of discarding everything with an error. The response includes `"_arbitus_partial": true` when not all upstreams replied in time — clients can proceed with the partial tool catalog rather than seeing an empty list. Closes #97.
 - **Stack overflow on deeply nested JSON payloads** (`src/middleware/payload_filter.rs`, `src/gateway.rs`): `scan_value` (payload filter) was fully recursive and would overflow the stack on deeply nested JSON arguments. Replaced with an explicit-stack iterative traversal capped at `MAX_DEPTH = 64`. `redact_value` (gateway) was also recursive; refactored to depth-parameterised recursion that returns the value unchanged beyond `REDACT_MAX_DEPTH = 64` instead of panicking. Added two new unit tests covering the boundary. Closes #95.

@@ -192,6 +192,26 @@ impl SqliteAudit {
             .execute_batch("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT NOT NULL DEFAULT '';");
         let _ = conn
             .execute_batch("ALTER TABLE audit_log ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';");
+        // Immutability triggers — database-level enforcement; zero runtime cost.
+        // The UPDATE trigger is always installed: no row should ever be modified.
+        // The DELETE trigger is only installed when rotation is disabled; rotation
+        // uses DELETE to prune old entries by design, so the two are mutually exclusive.
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS no_audit_update
+             BEFORE UPDATE ON audit_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'audit records are immutable');
+             END;",
+        )?;
+        if max_entries.is_none() && max_age_days.is_none() {
+            conn.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS no_audit_delete
+                 BEFORE DELETE ON audit_log
+                 BEGIN
+                     SELECT RAISE(ABORT, 'audit records are immutable');
+                 END;",
+            )?;
+        }
         let conn = Arc::new(Mutex::new(conn));
         let (tx, mut rx) = mpsc::channel::<Arc<AuditEntry>>(CHANNEL_CAPACITY);
 
@@ -655,8 +675,15 @@ mod tests {
         audit.record(entry(Outcome::Allowed));
         audit.flush().await;
 
-        // Tamper: overwrite the entry_hash in the database
+        // Simulate a privileged attacker who bypasses triggers to tamper with the DB.
+        // Drop triggers first (requires schema-write access), then mutate the row.
+        // The hash chain must still detect the tampering.
         let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS no_audit_update;
+             DROP TRIGGER IF EXISTS no_audit_delete;",
+        )
+        .unwrap();
         conn.execute(
             "UPDATE audit_log SET entry_hash = 'deadbeef' WHERE id = 1",
             [],
@@ -679,8 +706,13 @@ mod tests {
         audit.record(entry(Outcome::Allowed));
         audit.flush().await;
 
-        // Break the chain: change row 2's prev_hash without updating entry_hash
+        // Simulate a privileged attacker bypassing triggers before mutating.
         let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS no_audit_update;
+             DROP TRIGGER IF EXISTS no_audit_delete;",
+        )
+        .unwrap();
         conn.execute(
             "UPDATE audit_log SET prev_hash = 'badhash' WHERE id = 2",
             [],
@@ -691,6 +723,50 @@ mod tests {
         assert!(
             matches!(result, VerifyResult::ChainBroken { row_id: 2 }),
             "expected ChainBroken on row 2"
+        );
+    }
+
+    // ── Immutability triggers ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn trigger_prevents_update_on_audit_log() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.flush().await;
+
+        let conn = Connection::open(path).unwrap();
+        let result = conn.execute("UPDATE audit_log SET outcome = 'blocked' WHERE id = 1", []);
+        assert!(
+            result.is_err(),
+            "UPDATE must be rejected by the immutability trigger"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("immutable"),
+            "error must mention immutability, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_prevents_delete_on_audit_log() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let audit = SqliteAudit::new(path, test_metrics()).unwrap();
+        audit.record(entry(Outcome::Allowed));
+        audit.flush().await;
+
+        let conn = Connection::open(path).unwrap();
+        let result = conn.execute("DELETE FROM audit_log WHERE id = 1", []);
+        assert!(
+            result.is_err(),
+            "DELETE must be rejected by the immutability trigger"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("immutable"),
+            "error must mention immutability, got: {err}"
         );
     }
 
