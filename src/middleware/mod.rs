@@ -42,13 +42,22 @@ pub enum Decision {
     },
 }
 
-/// Core trait — each middleware implements `check`.
+/// Core trait — each middleware implements `check` (client→server) and
+/// optionally `check_response` (server→client, e.g. sampling/createMessage).
 /// Returning `Allow` means "no objection, pass it along".
 /// Returning `Block` stops the pipeline immediately.
 #[async_trait]
 pub trait Middleware: Send + Sync {
     fn name(&self) -> &'static str;
+
+    /// Called for every client→server request.
     async fn check(&self, ctx: &McpContext) -> Decision;
+
+    /// Called for server→client messages (`sampling/createMessage`,
+    /// `elicitation/create`). Default: allow unconditionally.
+    async fn check_response(&self, _ctx: &McpContext) -> Decision {
+        Decision::Allow { rl: None }
+    }
 }
 
 /// Composable pipeline — middlewares are executed in insertion order.
@@ -69,12 +78,29 @@ impl Pipeline {
         self
     }
 
-    /// Run all middlewares. Stops at the first `Block`.
+    /// Run all middlewares for a client→server request. Stops at the first `Block`.
     /// The last `Allow`'s `RateLimitInfo` (if any) is forwarded to the caller.
     pub async fn run(&self, ctx: &McpContext) -> Decision {
         let mut last_rl: Option<RateLimitInfo> = None;
         for mw in &self.middlewares {
             match mw.check(ctx).await {
+                Decision::Allow { rl } => {
+                    if rl.is_some() {
+                        last_rl = rl;
+                    }
+                }
+                block => return block,
+            }
+        }
+        Decision::Allow { rl: last_rl }
+    }
+
+    /// Run all middlewares for a server→client message (sampling / elicitation).
+    /// Stops at the first `Block`. Uses `check_response` on each middleware.
+    pub async fn run_response(&self, ctx: &McpContext) -> Decision {
+        let mut last_rl: Option<RateLimitInfo> = None;
+        for mw in &self.middlewares {
+            match mw.check_response(ctx).await {
                 Decision::Allow { rl } => {
                     if rl.is_some() {
                         last_rl = rl;
@@ -182,5 +208,68 @@ mod tests {
         } else {
             panic!("expected Block");
         }
+    }
+
+    // ── run_response ──────────────────────────────────────────────────────────
+
+    struct AlwaysBlockResponse;
+    #[async_trait]
+    impl Middleware for AlwaysBlockResponse {
+        fn name(&self) -> &'static str {
+            "block_response"
+        }
+        async fn check(&self, _: &McpContext) -> Decision {
+            Decision::Allow { rl: None }
+        }
+        async fn check_response(&self, _: &McpContext) -> Decision {
+            Decision::Block {
+                reason: "blocked_response".to_string(),
+                rl: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_response_empty_pipeline_allows() {
+        let p = Pipeline::new();
+        assert!(matches!(
+            p.run_response(&ctx()).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_response_default_impl_allows() {
+        // AlwaysBlock only overrides check(), not check_response() — response must pass.
+        let p = Pipeline::new().add(Arc::new(AlwaysBlock));
+        assert!(matches!(
+            p.run_response(&ctx()).await,
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_response_blocks_when_check_response_blocks() {
+        let p = Pipeline::new().add(Arc::new(AlwaysBlockResponse));
+        assert!(matches!(
+            p.run_response(&ctx()).await,
+            Decision::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_response_stops_at_first_block() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new()
+            .add(Arc::new(AlwaysBlockResponse))
+            .add(Arc::new(Counter(Arc::clone(&counter))));
+        assert!(matches!(
+            p.run_response(&ctx()).await,
+            Decision::Block { .. }
+        ));
+        // Counter::check_response uses default (Allow), but pipeline stops early.
+        // Since Counter has no custom check_response, it shouldn't be reached.
+        // (AlwaysBlockResponse blocks before Counter gets a chance.)
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }

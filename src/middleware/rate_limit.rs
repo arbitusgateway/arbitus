@@ -217,6 +217,56 @@ impl Middleware for RateLimitMiddleware {
 
         Decision::Allow { rl: Some(agent_rl) }
     }
+
+    /// Count server→client sampling/elicitation requests against the agent's
+    /// global rate limit. Sampling triggers LLM inference at the client's cost,
+    /// so it must be metered just like any other billable operation.
+    async fn check_response(&self, ctx: &McpContext) -> Decision {
+        if !matches!(
+            ctx.method.as_str(),
+            "sampling/createMessage" | "elicitation/create"
+        ) {
+            return Decision::Allow { rl: None };
+        }
+
+        let (global_limit, global_burst) = {
+            let cfg = self.config.borrow();
+            let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
+                return Decision::Allow { rl: None };
+            };
+            let burst = policy.rate_limit_burst.unwrap_or(policy.rate_limit);
+            (policy.rate_limit, burst)
+        };
+
+        let entry = get_or_create(
+            &self.agent_limiters,
+            ctx.agent_id.clone(),
+            global_limit,
+            global_burst,
+        );
+        let (allowed, remaining, reset_after) = entry.check();
+        if !allowed {
+            return Decision::Block {
+                reason: format!(
+                    "sampling rate limit exceeded for agent '{}' ({global_limit}/min)",
+                    ctx.agent_id
+                ),
+                rl: Some(RateLimitInfo {
+                    limit: global_limit,
+                    remaining: 0,
+                    reset_after_secs: reset_after,
+                }),
+            };
+        }
+
+        Decision::Allow {
+            rl: Some(RateLimitInfo {
+                limit: global_limit,
+                remaining,
+                reset_after_secs: reset_after,
+            }),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
