@@ -9,16 +9,14 @@ use crate::{
     schema_cache::SchemaCache,
     upstream::McpUpstream,
 };
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::{
-    sync::{RwLock, watch},
-    time::timeout,
-};
+use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
 
 /// Maximum time to wait for all upstreams to respond during federated tools/list.
@@ -224,10 +222,12 @@ impl McpGateway {
     /// Queries all named upstreams for their tool lists, merges the results, and stores
     /// a routing table so subsequent `tools/call` requests can be routed correctly.
     /// Colliding tool names (same name from ≥2 upstreams) are prefixed `<upstream>__name`.
+    ///
+    /// If the deadline fires before all upstreams respond, partial results from
+    /// already-completed upstreams are returned rather than discarding everything.
+    /// The response includes `"_arbitus_partial": true` when not all upstreams replied.
     async fn federated_tools_list(&self, agent_id: &str, request_id: &Value) -> Value {
-        use futures_util::future::join_all;
-
-        let futures: Vec<_> = self
+        let mut pending: FuturesUnordered<_> = self
             .named_upstreams
             .iter()
             .map(|(name, upstream)| {
@@ -244,21 +244,35 @@ impl McpGateway {
             })
             .collect();
 
-        let results = match timeout(FEDERATION_DISCOVERY_TIMEOUT, join_all(futures)).await {
-            Ok(r) => r,
-            Err(_) => {
-                tracing::warn!(
-                    agent = agent_id,
-                    timeout_secs = FEDERATION_DISCOVERY_TIMEOUT.as_secs(),
-                    "federated tools/list timed out"
-                );
-                return json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": { "code": -32603, "message": "federated tools/list timed out" }
-                });
+        let total = pending.len();
+        let mut results: Vec<(String, Option<Value>)> = Vec::with_capacity(total);
+
+        let deadline = tokio::time::sleep(FEDERATION_DISCOVERY_TIMEOUT);
+        tokio::pin!(deadline);
+
+        loop {
+            if results.len() == total {
+                break; // all upstreams responded
             }
-        };
+            tokio::select! {
+                biased;
+                Some(result) = pending.next() => {
+                    results.push(result);
+                }
+                _ = &mut deadline => {
+                    tracing::warn!(
+                        agent = agent_id,
+                        responded = results.len(),
+                        total,
+                        timeout_secs = FEDERATION_DISCOVERY_TIMEOUT.as_secs(),
+                        "federated tools/list timed out — returning partial results"
+                    );
+                    break;
+                }
+            }
+        }
+
+        let partial = results.len() < total;
 
         // Collect (upstream_name, tool_json)
         let mut all_tools: Vec<(String, Value)> = Vec::new();
@@ -301,11 +315,19 @@ impl McpGateway {
             .await
             .insert(agent_id.to_string(), routes);
 
-        json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": { "tools": merged }
-        })
+        if partial {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "tools": merged, "_arbitus_partial": true }
+            })
+        } else {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "tools": merged }
+            })
+        }
     }
 
     /// Policy check + upstream forwarding + response filtering.
@@ -1596,37 +1618,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn federated_tools_list_times_out_with_error() {
-        use tokio::time::{self, Duration};
-        // Shorten the constant so the test finishes quickly.
-        // We do this by pointing to a gateway with a hanging upstream and
-        // overriding the runtime timeout via time::pause + advance.
-        time::pause();
+    fn fed_agent_policy() -> AgentPolicy {
+        AgentPolicy {
+            allowed_tools: None,
+            denied_tools: vec![],
+            rate_limit: 100,
+            rate_limit_burst: None,
+            tool_rate_limits: HashMap::new(),
+            upstream: None,
+            api_key: None,
+            timeout_secs: None,
+            approval_required: vec![],
+            hitl_timeout_secs: 60,
+            shadow_tools: vec![],
+            federate: true,
+            allowed_resources: None,
+            denied_resources: vec![],
+            allowed_prompts: None,
+            denied_prompts: vec![],
+            mtls_identity: None,
+        }
+    }
 
+    fn make_gw_with_named(named: HashMap<String, Arc<dyn McpUpstream>>) -> McpGateway {
         let mut agents = HashMap::new();
-        agents.insert(
-            "agent".to_string(),
-            AgentPolicy {
-                allowed_tools: None,
-                denied_tools: vec![],
-                rate_limit: 100,
-                rate_limit_burst: None,
-                tool_rate_limits: HashMap::new(),
-                upstream: None,
-                api_key: None,
-                timeout_secs: None,
-                approval_required: vec![],
-                hitl_timeout_secs: 60,
-                shadow_tools: vec![],
-                federate: true,
-                allowed_resources: None,
-                denied_resources: vec![],
-                allowed_prompts: None,
-                denied_prompts: vec![],
-                mtls_identity: None,
-            },
-        );
+        agents.insert("agent".to_string(), fed_agent_policy());
         let live = Arc::new(LiveConfig::new(
             agents,
             vec![],
@@ -1636,18 +1652,25 @@ mod tests {
             None,
         ));
         let (_, rx) = watch::channel(live);
-        let mut named_map: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
-        named_map.insert("hanging".to_string(), Arc::new(HangingUpstream));
-
-        let gw = McpGateway::new(
+        McpGateway::new(
             Pipeline::new(),
             Arc::new(NoopUpstream),
-            named_map,
+            named,
             Arc::new(NoopAudit),
             Arc::new(GatewayMetrics::new().unwrap()),
             rx,
             SchemaCache::new(),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn federated_tools_list_times_out_returns_empty_partial() {
+        use tokio::time::{self, Duration};
+        time::pause();
+
+        let mut named_map: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
+        named_map.insert("hanging".to_string(), Arc::new(HangingUpstream));
+        let gw = make_gw_with_named(named_map);
 
         let request_id = json!(99);
         let fut = gw.federated_tools_list("agent", &request_id);
@@ -1661,11 +1684,52 @@ mod tests {
             } => unreachable!(),
         };
 
+        // Timeout with no responses → empty tools list marked partial, no error
         assert!(
-            result["error"].is_object(),
-            "timed-out federation should return a JSON-RPC error, got: {result}"
+            result["error"].is_null(),
+            "timed-out federation should not return a JSON-RPC error, got: {result}"
         );
         assert_eq!(result["id"], json!(99));
+        assert_eq!(result["result"]["tools"], json!([]));
+        assert_eq!(result["result"]["_arbitus_partial"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn federated_tools_list_partial_results_on_timeout() {
+        use tokio::time::{self, Duration};
+        time::pause();
+
+        // One fast upstream that responds immediately, one that hangs.
+        let mut named_map: HashMap<String, Arc<dyn McpUpstream>> = HashMap::new();
+        named_map.insert(
+            "fast".to_string(),
+            Arc::new(ToolListUpstream {
+                tools: vec!["fast_tool"],
+            }),
+        );
+        named_map.insert("slow".to_string(), Arc::new(HangingUpstream));
+        let gw = make_gw_with_named(named_map);
+
+        let request_id = json!(42);
+        let fut = gw.federated_tools_list("agent", &request_id);
+
+        let result = tokio::select! {
+            r = fut => r,
+            _ = async {
+                time::advance(FEDERATION_DISCOVERY_TIMEOUT + Duration::from_millis(1)).await;
+                std::future::pending::<()>().await
+            } => unreachable!(),
+        };
+
+        // Should contain the fast upstream's tool and be marked partial
+        assert!(
+            result["error"].is_null(),
+            "should not error on partial timeout"
+        );
+        assert_eq!(result["result"]["_arbitus_partial"], json!(true));
+        let tools = result["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], json!("fast_tool"));
     }
 
     #[tokio::test]

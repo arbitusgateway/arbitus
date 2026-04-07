@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Federation timeout now returns partial results** (`src/gateway.rs`): when `tools/list` is federated across multiple upstreams and the deadline fires, results from upstreams that already responded are now returned instead of discarding everything with an error. The response includes `"_arbitus_partial": true` when not all upstreams replied in time — clients can proceed with the partial tool catalog rather than seeing an empty list. Closes #97.
+
 ### Changed
 - **Rate limiter replaced with `governor` (GCRA, lock-free)** (`src/middleware/rate_limit.rs`): replaced the custom `Mutex<HashMap<String, Vec<Instant>>>` sliding-window implementation with the `governor` crate (GCRA algorithm). Enforcement is now lock-free (atomics) and O(1) per check — no more O(n) `Vec::retain` on every request, no more background cleanup task, no more TOCTOU race (closes #82 root cause). Adds optional `rate_limit_burst` field on `AgentPolicy` (defaults to `rate_limit` for full backward compatibility). Closes #98.
 
