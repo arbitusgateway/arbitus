@@ -609,6 +609,17 @@ fn scrub_request_args(mut msg: Value, patterns: &[regex::Regex]) -> Value {
 /// is replaced with the literal string `"[REDACTED]"`. Returns the filtered value
 /// and a flag indicating whether anything was redacted.
 pub fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
+    redact_value_depth(val, patterns, 0)
+}
+
+/// Maximum nesting depth accepted during redaction.  Payloads deeper than this
+/// are returned unchanged (no redaction attempted) to avoid stack overflow.
+const REDACT_MAX_DEPTH: usize = 64;
+
+fn redact_value_depth(val: Value, patterns: &[regex::Regex], depth: usize) -> (Value, bool) {
+    if depth > REDACT_MAX_DEPTH {
+        return (val, false);
+    }
     match val {
         Value::String(s) => {
             if matches_any_variant(&s, patterns) {
@@ -622,7 +633,7 @@ pub fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
             let new_arr = arr
                 .into_iter()
                 .map(|v| {
-                    let (v, r) = redact_value(v, patterns);
+                    let (v, r) = redact_value_depth(v, patterns, depth + 1);
                     any |= r;
                     v
                 })
@@ -634,7 +645,7 @@ pub fn redact_value(val: Value, patterns: &[regex::Regex]) -> (Value, bool) {
             let new_obj = obj
                 .into_iter()
                 .map(|(k, v)| {
-                    let (v, r) = redact_value(v, patterns);
+                    let (v, r) = redact_value_depth(v, patterns, depth + 1);
                     any |= r;
                     (k, v)
                 })
