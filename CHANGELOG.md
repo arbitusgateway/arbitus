@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **MCP Sampling security — bidirectional middleware pipeline** (`src/middleware/mod.rs`, `src/gateway.rs`, `src/middleware/payload_filter.rs`, `src/middleware/rate_limit.rs`): server-initiated `sampling/createMessage` and `elicitation/create` requests now run through the security pipeline instead of bypassing all controls. The `Middleware` trait gains an optional `check_response` method (default: `Allow`) and `Pipeline` gains `run_response`. `PayloadFilterMiddleware::check_response` scans sampling message text for blocked patterns and injection signatures. `RateLimitMiddleware::check_response` counts sampling requests against the agent's rate limit (server-initiated LLM inference is billed to the agent). `McpGateway::handle_server_request` is the new transport-level entry point that runs the response pipeline and emits audit entries for every server-initiated message. Closes #86.
 - **SQLite immutable audit triggers** (`src/audit/sqlite.rs`): two `BEFORE UPDATE / BEFORE DELETE` triggers are now installed during schema initialisation, enforcing audit record immutability at the database engine level — zero runtime performance cost. Any attempt to modify or delete a committed audit row is aborted by SQLite regardless of which process or connection issues it. The `no_audit_delete` trigger is skipped when rotation (`max_entries` / `max_age_days`) is configured, since rotation intentionally prunes old rows. Closes #99.
 
 ### Fixed
