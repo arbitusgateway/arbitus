@@ -19,6 +19,7 @@ mod tests {
             allowed_tools: None,
             denied_tools: vec![],
             rate_limit: 60,
+            rate_limit_burst: None,
             tool_rate_limits: HashMap::new(),
             upstream: None,
             api_key: None,

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Rate limiter replaced with `governor` (GCRA, lock-free)** (`src/middleware/rate_limit.rs`): replaced the custom `Mutex<HashMap<String, Vec<Instant>>>` sliding-window implementation with the `governor` crate (GCRA algorithm). Enforcement is now lock-free (atomics) and O(1) per check — no more O(n) `Vec::retain` on every request, no more background cleanup task, no more TOCTOU race (closes #82 root cause). Adds optional `rate_limit_burst` field on `AgentPolicy` (defaults to `rate_limit` for full backward compatibility). Closes #98.
+
 ### Added
 - **Kubernetes ConfigMap watcher** (`src/kubernetes.rs`, `src/reload.rs`, `src/config.rs`): Arbitus can now watch a Kubernetes ConfigMap via the K8s API and hot-reload its configuration on every `Apply` event — no `SIGUSR1` or 30-second polling required. Set `kubernetes.configmap_name` in `gateway.yml` to enable. Namespace defaults to the pod's own namespace (read from the projected service-account token). Built as an optional feature (`kubernetes`, enabled by default in the official image) using `kube 0.98` + `kube-runtime`. The Helm chart gains a `kubernetesWatcher` section that automatically provisions the Role + RoleBinding and injects the `kubernetes:` config block. Closes #132.
 

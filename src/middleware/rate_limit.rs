@@ -1,14 +1,225 @@
-use super::{Decision, McpContext, Middleware};
+use super::{Decision, McpContext, Middleware, RateLimitInfo};
 use crate::live_config::LiveConfig;
 use async_trait::async_trait;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use std::{
     collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
+    num::NonZeroU32,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
-type ToolCounts = Arc<Mutex<HashMap<(String, String), Vec<Instant>>>>;
+// ── Per-key limiter entry ─────────────────────────────────────────────────────
+
+/// One rate-limiter entry per (agent | tool | IP) key.
+///
+/// `governor` handles enforcement via lock-free atomics (GCRA).
+/// The separate `remaining` / `window_start_ms` atomics give us an O(1)
+/// approximation of burst-capacity remaining for `X-RateLimit-Remaining`
+/// response headers — no Vec, no Mutex.
+struct LimiterEntry {
+    limiter: DefaultDirectRateLimiter,
+    /// Configured quota (requests / min).
+    limit: usize,
+    /// Approximate remaining capacity in the current 60-second window.
+    remaining: AtomicI64,
+    /// Unix-epoch milliseconds when the current window started.
+    window_start_ms: AtomicU64,
+}
+
+impl LimiterEntry {
+    fn new(limit: usize, burst: usize) -> Self {
+        let nz_limit = NonZeroU32::new(limit.max(1) as u32).expect("rate_limit > 0");
+        let nz_burst = NonZeroU32::new(burst.max(1) as u32).expect("burst > 0");
+        let quota = Quota::per_minute(nz_limit).allow_burst(nz_burst);
+        Self {
+            limiter: RateLimiter::direct(quota),
+            limit,
+            remaining: AtomicI64::new(burst as i64),
+            window_start_ms: AtomicU64::new(now_ms()),
+        }
+    }
+
+    /// Check whether a cell is available.
+    /// Returns `(allowed, remaining, reset_after_secs)`.
+    fn check(&self) -> (bool, usize, u64) {
+        // Reset the remaining counter once per 60-second window.
+        let ws = self.window_start_ms.load(Ordering::Relaxed);
+        let now = now_ms();
+        if now.saturating_sub(ws) >= 60_000 {
+            // CAS prevents two threads from both resetting at once.
+            if self
+                .window_start_ms
+                .compare_exchange(ws, now, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.remaining.store(self.limit as i64, Ordering::Relaxed);
+            }
+        }
+
+        let elapsed_secs = now.saturating_sub(self.window_start_ms.load(Ordering::Relaxed)) / 1000;
+        let reset_after = 60u64.saturating_sub(elapsed_secs);
+
+        match self.limiter.check() {
+            Ok(_) => {
+                let r = (self.remaining.fetch_sub(1, Ordering::Relaxed) - 1).max(0) as usize;
+                (true, r, reset_after)
+            }
+            Err(_) => (false, 0, reset_after),
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+// ── Limiter store ─────────────────────────────────────────────────────────────
+
+type EntryMap<K> = Arc<RwLock<HashMap<K, Arc<LimiterEntry>>>>;
+
+/// Look up an existing entry or create a new one with the given `limit`/`burst`.
+/// If the stored entry's limit differs from the current config (after a hot-reload),
+/// replace it so the new rate takes effect immediately.
+fn get_or_create<K>(map: &EntryMap<K>, key: K, limit: usize, burst: usize) -> Arc<LimiterEntry>
+where
+    K: std::hash::Hash + Eq + Clone,
+{
+    // Fast path: entry exists and has the right limit.
+    {
+        let m = map.read().unwrap();
+        if let Some(e) = m.get(&key)
+            && e.limit == limit
+        {
+            return Arc::clone(e);
+        }
+    }
+    // Slow path: create (or replace) the entry.
+    let mut m = map.write().unwrap();
+    let entry = Arc::new(LimiterEntry::new(limit, burst));
+    m.insert(key, Arc::clone(&entry));
+    entry
+}
+
+// ── Middleware ─────────────────────────────────────────────────────────────────
+
+pub struct RateLimitMiddleware {
+    config: watch::Receiver<Arc<LiveConfig>>,
+    /// One entry per agent_id.
+    agent_limiters: EntryMap<String>,
+    /// One entry per (agent_id, tool_name) pair.
+    tool_limiters: EntryMap<(String, String)>,
+    /// One entry per client IP string.
+    ip_limiters: EntryMap<String>,
+}
+
+impl RateLimitMiddleware {
+    pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
+        Self {
+            config,
+            agent_limiters: Arc::new(RwLock::new(HashMap::new())),
+            tool_limiters: Arc::new(RwLock::new(HashMap::new())),
+            ip_limiters: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Middleware for RateLimitMiddleware {
+    fn name(&self) -> &'static str {
+        "rate_limit"
+    }
+
+    async fn check(&self, ctx: &McpContext) -> Decision {
+        if !matches!(
+            ctx.method.as_str(),
+            "tools/call" | "resources/read" | "resources/subscribe" | "prompts/get"
+        ) {
+            return Decision::Allow { rl: None };
+        }
+
+        let (global_limit, global_burst, tool_limit, ip_limit) = {
+            let cfg = self.config.borrow();
+            let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
+                return Decision::Allow { rl: None }; // unknown agents blocked by AuthMiddleware
+            };
+            let burst = policy.rate_limit_burst.unwrap_or(policy.rate_limit);
+            let tool_limit = ctx
+                .tool_name
+                .as_ref()
+                .and_then(|t| policy.tool_rate_limits.get(t).copied());
+            (policy.rate_limit, burst, tool_limit, cfg.ip_rate_limit)
+        };
+
+        // ── IP rate limit (cheapest rejection — checked first) ────────────────
+        if let (Some(limit), Some(ip)) = (ip_limit, ctx.client_ip.as_ref()) {
+            let entry = get_or_create(&self.ip_limiters, ip.clone(), limit, limit);
+            let (allowed, remaining, reset_after) = entry.check();
+            if !allowed {
+                return Decision::Block {
+                    reason: format!("IP rate limit exceeded ({limit}/min)"),
+                    rl: Some(RateLimitInfo {
+                        limit,
+                        remaining,
+                        reset_after_secs: reset_after,
+                    }),
+                };
+            }
+        }
+
+        // ── Global agent rate limit ───────────────────────────────────────────
+        let agent_entry = get_or_create(
+            &self.agent_limiters,
+            ctx.agent_id.clone(),
+            global_limit,
+            global_burst,
+        );
+        let (allowed, remaining, reset_after) = agent_entry.check();
+        if !allowed {
+            return Decision::Block {
+                reason: format!("rate limit exceeded ({global_limit}/min)"),
+                rl: Some(RateLimitInfo {
+                    limit: global_limit,
+                    remaining: 0,
+                    reset_after_secs: reset_after,
+                }),
+            };
+        }
+        let agent_rl = RateLimitInfo {
+            limit: global_limit,
+            remaining,
+            reset_after_secs: reset_after,
+        };
+
+        // ── Per-tool rate limit ───────────────────────────────────────────────
+        if let (Some(limit), Some(tool)) = (tool_limit, ctx.tool_name.as_ref()) {
+            let key = (ctx.agent_id.clone(), tool.clone());
+            let entry = get_or_create(&self.tool_limiters, key, limit, limit);
+            let (allowed, _, reset_after) = entry.check();
+            if !allowed {
+                return Decision::Block {
+                    reason: format!("tool '{tool}' rate limit exceeded ({limit}/min)"),
+                    rl: Some(RateLimitInfo {
+                        limit,
+                        remaining: 0,
+                        reset_after_secs: reset_after,
+                    }),
+                };
+            }
+        }
+
+        Decision::Allow { rl: Some(agent_rl) }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -20,6 +231,7 @@ mod tests {
             allowed_tools: None,
             denied_tools: vec![],
             rate_limit,
+            rate_limit_burst: None,
             tool_rate_limits: HashMap::new(),
             upstream: None,
             api_key: None,
@@ -77,7 +289,6 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_agent_passes_to_auth_middleware() {
-        // Rate limit doesn't block unknown agents — that's auth's job
         let mw = make_mw(HashMap::new(), None);
         assert!(matches!(
             mw.check(&ctx("ghost", "echo", None)).await,
@@ -128,6 +339,7 @@ mod tests {
                 allowed_tools: None,
                 denied_tools: vec![],
                 rate_limit: 100,
+                rate_limit_burst: None,
                 tool_rate_limits: tool_limits,
                 upstream: None,
                 api_key: None,
@@ -256,174 +468,30 @@ mod tests {
             Decision::Block { .. }
         ));
     }
-}
 
-pub struct RateLimitMiddleware {
-    config: watch::Receiver<Arc<LiveConfig>>,
-    /// Per-agent sliding window counters — keyed by agent_id.
-    counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-    /// Per-(agent, tool) sliding window counters for tool_rate_limits.
-    tool_counts: ToolCounts,
-    /// Per-IP sliding window counters (HTTP mode). Keyed by client IP string.
-    ip_counts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-}
-
-impl RateLimitMiddleware {
-    pub fn new(config: watch::Receiver<Arc<LiveConfig>>) -> Self {
-        let counts = Arc::new(Mutex::new(HashMap::new()));
-        let tool_counts = Arc::new(Mutex::new(HashMap::new()));
-        let ip_counts = Arc::new(Mutex::new(HashMap::new()));
-
-        // Background task: purge inactive entries every 5 minutes to prevent
-        // unbounded HashMap growth when many distinct agents/IPs are seen.
-        {
-            let counts = Arc::clone(&counts);
-            let tool_counts = Arc::clone(&tool_counts);
-            let ip_counts = Arc::clone(&ip_counts);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(300));
-                interval.tick().await; // skip immediate tick
-                loop {
-                    interval.tick().await;
-                    let window = Duration::from_secs(60);
-                    let now = Instant::now();
-                    {
-                        let mut m = counts.lock().await;
-                        m.retain(|_, ts: &mut Vec<Instant>| {
-                            ts.retain(|t| now.duration_since(*t) < window);
-                            !ts.is_empty()
-                        });
-                    }
-                    {
-                        let mut m = tool_counts.lock().await;
-                        m.retain(|_, ts: &mut Vec<Instant>| {
-                            ts.retain(|t| now.duration_since(*t) < window);
-                            !ts.is_empty()
-                        });
-                    }
-                    {
-                        let mut m = ip_counts.lock().await;
-                        m.retain(|_, ts: &mut Vec<Instant>| {
-                            ts.retain(|t| now.duration_since(*t) < window);
-                            !ts.is_empty()
-                        });
-                    }
-                }
-            });
-        }
-
-        Self {
-            config,
-            counts,
-            tool_counts,
-            ip_counts,
-        }
-    }
-}
-
-/// Seconds until the oldest timestamp in `ts` ages out of the 60s window.
-fn window_reset_secs(ts: &[Instant], now: Instant) -> u64 {
-    ts.first()
-        .map(|oldest| {
-            let elapsed = now.duration_since(*oldest).as_secs();
-            60u64.saturating_sub(elapsed)
-        })
-        .unwrap_or(60)
-}
-
-#[async_trait]
-impl Middleware for RateLimitMiddleware {
-    fn name(&self) -> &'static str {
-        "rate_limit"
-    }
-
-    async fn check(&self, ctx: &McpContext) -> Decision {
-        use super::RateLimitInfo;
-
-        if !matches!(
-            ctx.method.as_str(),
-            "tools/call" | "resources/read" | "resources/subscribe" | "prompts/get"
-        ) {
-            return Decision::Allow { rl: None };
-        }
-
-        let (global_limit, tool_limit, ip_limit) = {
-            let cfg = self.config.borrow();
-            let Some(policy) = cfg.agents.get(&ctx.agent_id) else {
-                return Decision::Allow { rl: None }; // unknown agents are blocked by AuthMiddleware
-            };
-            let tool_limit = ctx
-                .tool_name
-                .as_ref()
-                .and_then(|t| policy.tool_rate_limits.get(t).copied());
-            (policy.rate_limit, tool_limit, cfg.ip_rate_limit)
-        };
-
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
-
-        // ── IP rate limit (checked first — cheapest rejection) ─────────────────
-        if let (Some(limit), Some(ip)) = (ip_limit, ctx.client_ip.as_ref()) {
-            let mut ip_counts = self.ip_counts.lock().await;
-            let ts = ip_counts.entry(ip.clone()).or_default();
-            ts.retain(|t| now.duration_since(*t) < window);
-            if ts.len() >= limit {
-                return Decision::Block {
-                    reason: format!("IP rate limit exceeded ({limit}/min)"),
-                    rl: Some(RateLimitInfo {
-                        limit,
-                        remaining: 0,
-                        reset_after_secs: window_reset_secs(ts, now),
-                    }),
-                };
-            }
-            ts.push(now);
-        }
-
-        // ── Global agent rate limit ────────────────────────────────────────────
-        let agent_rl = {
-            let mut counts = self.counts.lock().await;
-            let ts = counts.entry(ctx.agent_id.clone()).or_default();
-            ts.retain(|t| now.duration_since(*t) < window);
-
-            if ts.len() >= global_limit {
-                return Decision::Block {
-                    reason: format!("rate limit exceeded ({global_limit}/min)"),
-                    rl: Some(RateLimitInfo {
-                        limit: global_limit,
-                        remaining: 0,
-                        reset_after_secs: window_reset_secs(ts, now),
-                    }),
-                };
-            }
-            ts.push(now);
-            RateLimitInfo {
-                limit: global_limit,
-                remaining: global_limit.saturating_sub(ts.len()),
-                reset_after_secs: window_reset_secs(ts, now),
-            }
-        };
-
-        // ── Per-tool rate limit ────────────────────────────────────────────────
-        if let (Some(limit), Some(tool)) = (tool_limit, ctx.tool_name.as_ref()) {
-            let key = (ctx.agent_id.clone(), tool.clone());
-            let mut tool_counts = self.tool_counts.lock().await;
-            let ts = tool_counts.entry(key.clone()).or_default();
-            ts.retain(|t| now.duration_since(*t) < window);
-
-            if ts.len() >= limit {
-                return Decision::Block {
-                    reason: format!("tool '{tool}' rate limit exceeded ({limit}/min)"),
-                    rl: Some(RateLimitInfo {
-                        limit,
-                        remaining: 0,
-                        reset_after_secs: window_reset_secs(ts, now),
-                    }),
-                };
-            }
-            ts.push(now);
-        }
-
-        Decision::Allow { rl: Some(agent_rl) }
+    #[tokio::test]
+    async fn burst_config_respected() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a".to_string(),
+            AgentPolicy {
+                rate_limit: 60,
+                rate_limit_burst: Some(2), // only 2 rapid requests allowed
+                ..policy(60)
+            },
+        );
+        let mw = make_mw(agents, None);
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            mw.check(&ctx("a", "echo", None)).await,
+            Decision::Block { .. }
+        ));
     }
 }

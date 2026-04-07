@@ -322,6 +322,10 @@ pub struct AgentPolicy {
     pub denied_tools: Vec<String>,
     #[serde(default = "default_rate_limit")]
     pub rate_limit: usize,
+    /// Maximum burst size for the agent rate limiter.
+    /// Defaults to `rate_limit` (entire quota usable as burst, matching the old sliding-window behaviour).
+    #[serde(default)]
+    pub rate_limit_burst: Option<usize>,
     /// Per-tool rate limits (calls/min). Checked in addition to the global rate_limit.
     #[serde(default)]
     pub tool_rate_limits: HashMap<String, usize>,
@@ -757,6 +761,7 @@ pub(crate) fn make_agent(
         allowed_tools: allowed.map(|v| v.into_iter().map(String::from).collect()),
         denied_tools: denied.into_iter().map(String::from).collect(),
         rate_limit,
+        rate_limit_burst: None,
         tool_rate_limits: std::collections::HashMap::new(),
         upstream: None,
         api_key: None,

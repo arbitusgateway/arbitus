@@ -37,6 +37,7 @@ Agent (Cursor, Claude, etc.)
 - **Multiple upstreams** — route different agents to different MCP servers
 - **Circuit breaker** — automatic upstream failure isolation with half-open recovery
 - **Config hot-reload** — reload on `SIGUSR1`, automatically every 30 seconds, or event-driven via Kubernetes ConfigMap watcher
+- **Lock-free rate limiting** — GCRA algorithm via `governor`; O(1) per check, configurable burst allowance
 - **Metrics** — Prometheus-compatible `/metrics` endpoint with cost/token estimation
 - **OpenTelemetry** — export traces to any OTLP backend (Jaeger, Tempo, Honeycomb, Datadog)
 - **Dashboard** — `/dashboard` audit viewer with per-agent filtering
