@@ -6,7 +6,7 @@ This file lists the individuals with commit access to the Arbitus repository and
 
 | Name | GitHub | Affiliation | Focus Areas |
 |------|--------|-------------|-------------|
-| Natan Velten | [@nfvelten](https://github.com/nfvelten) | Independent | Architecture, Security, Core, Governance |
+| Nicholas Velten | [@nfvelten](https://github.com/nfvelten) | Independent | Architecture, Security, Core, Governance |
 
 ## Maintainer Responsibilities
 
