@@ -87,7 +87,7 @@
 ## [0.14.0] — 2026-03-31
 
 ### Added
-- **Docker image published to GHCR**: `ghcr.io/nfvelten/arbitus:<version>` built and pushed automatically on every `v*` tag via `.github/workflows/docker.yml`; multi-arch (`linux/amd64` + `linux/arm64`); layer cache backed by GitHub Actions cache
+- **Docker image published to GHCR**: `ghcr.io/arbitusgateway/arbitus:<version>` built and pushed automatically on every `v*` tag via `.github/workflows/docker.yml`; multi-arch (`linux/amd64` + `linux/arm64`); layer cache backed by GitHub Actions cache
 - **`docker-compose.yml`**: healthcheck via `wget /health`, `LOG_FORMAT`/`LOG_LEVEL` env vars documented, commented example for `ARBITUS_ADMIN_TOKEN` secret injection
 
 ### Changed

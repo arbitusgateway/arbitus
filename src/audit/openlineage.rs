@@ -15,7 +15,7 @@ use super::{AuditEntry, AuditLog, Outcome};
 /// | `eventTime`                  | `entry.ts` in RFC 3339 format                    |
 /// | `run.facets.arbitus:execution` | outcome, reason, agent_id, input_tokens          |
 /// | `inputs[0]`                  | `{namespace: agent_id, name: tool_name}`         |
-/// | `producer`                   | `"https://github.com/nfvelten/arbitus"`          |
+/// | `producer`                   | `"https://github.com/arbitusgateway/arbitus"`          |
 use crate::metrics::GatewayMetrics;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
-const PRODUCER: &str = "https://github.com/nfvelten/arbitus";
+const PRODUCER: &str = "https://github.com/arbitusgateway/arbitus";
 const SCHEMA_URL: &str = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent";
 const CHANNEL_CAPACITY: usize = 4096;
 

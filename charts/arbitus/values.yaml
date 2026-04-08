@@ -1,6 +1,6 @@
 # ── Image ─────────────────────────────────────────────────────────────────────
 image:
-  repository: ghcr.io/nfvelten/arbitus
+  repository: ghcr.io/arbitusgateway/arbitus
   # Defaults to the chart's appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent

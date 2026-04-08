@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/arbitus.svg)](https://crates.io/crates/arbitus)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/nfvelten/arbitus/actions/workflows/ci.yml/badge.svg)](https://github.com/nfvelten/arbitus/actions/workflows/ci.yml)
+[![CI](https://github.com/arbitusgateway/arbitus/actions/workflows/ci.yml/badge.svg)](https://github.com/arbitusgateway/arbitus/actions/workflows/ci.yml)
 
 A security proxy that sits between AI agents and MCP servers. It enforces per-agent policies before any tool call reaches the upstream server.
 
@@ -57,6 +57,13 @@ Agent (Cursor, Claude, etc.)
 | **[Observability](docs/observability.md)** | Prometheus metrics, cost/token estimation, health check, dashboard, config hot-reload, OpenTelemetry, logging, circuit breaker |
 | **[Architecture](docs/architecture.md)** | Middleware pipeline, trait-based design, encoding-aware filtering, test structure |
 
+## Community
+
+- **[Contributing](CONTRIBUTING.md)** — How to contribute, development setup, code quality requirements
+- **[Code of Conduct](CODE_OF_CONDUCT.md)** — Standards for community behavior
+- **[Security Policy](SECURITY.md)** — Reporting vulnerabilities, supported versions, security features
+- **[Governance](GOVERNANCE.md)** — Project roles, decision-making, becoming a maintainer
+
 ## Quick start
 
 ### Install
@@ -65,7 +72,7 @@ Agent (Cursor, Claude, etc.)
 cargo install arbitus
 ```
 
-Or download a pre-built binary from the [releases page](https://github.com/nfvelten/arbitus/releases):
+Or download a pre-built binary from the [releases page](https://github.com/arbitusgateway/arbitus/releases):
 
 | Platform | Archive |
 |---|---|
@@ -78,7 +85,7 @@ Or download a pre-built binary from the [releases page](https://github.com/nfvel
 Or build from source:
 
 ```sh
-git clone https://github.com/nfvelten/arbitus
+git clone https://github.com/arbitusgateway/arbitus
 cd arbitus
 cargo build --release
 ```
@@ -86,8 +93,8 @@ cargo build --release
 Or use Docker:
 
 ```sh
-docker pull ghcr.io/nfvelten/arbitus:latest
-docker run --rm -p 4000:4000 -v $(pwd)/gateway.yml:/app/gateway.yml ghcr.io/nfvelten/arbitus:latest
+docker pull ghcr.io/arbitusgateway/arbitus:latest
+docker run --rm -p 4000:4000 -v $(pwd)/gateway.yml:/app/gateway.yml ghcr.io/arbitusgateway/arbitus:latest
 ```
 
 ### Configure

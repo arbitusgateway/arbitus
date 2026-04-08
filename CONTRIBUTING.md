@@ -10,7 +10,7 @@ For anything beyond a small fix, open an issue first to discuss the approach. Th
 
 ```bash
 # Prerequisites: Rust stable (1.85+)
-git clone https://github.com/nfvelten/arbitus
+git clone https://github.com/arbitusgateway/arbitus
 cd arbitus
 cargo build
 ```

@@ -1,7 +1,7 @@
 services:
   gateway:
     # Use a published release image or build locally:
-    #   image: ghcr.io/nfvelten/arbitus:latest
+    #   image: ghcr.io/arbitusgateway/arbitus:latest
     build: .
     ports:
       - "4000:4000"

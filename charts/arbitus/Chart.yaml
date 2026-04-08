@@ -4,9 +4,9 @@ description: Security proxy for MCP servers — auth, rate limiting, payload fil
 type: application
 version: 0.18.0
 appVersion: "0.18.0"
-home: https://github.com/nfvelten/arbitus
+home: https://github.com/arbitusgateway/arbitus
 sources:
-  - https://github.com/nfvelten/arbitus
+  - https://github.com/arbitusgateway/arbitus
 keywords:
   - mcp
   - ai

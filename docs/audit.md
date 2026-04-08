@@ -124,7 +124,7 @@ Payload sent per `tools/call`:
   "job": { "namespace": "arbitus", "name": "cursor/read_file", "facets": {} },
   "inputs": [{ "namespace": "cursor", "name": "read_file" }],
   "outputs": [],
-  "producer": "https://github.com/nfvelten/arbitus",
+  "producer": "https://github.com/arbitusgateway/arbitus",
   "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent"
 }
 ```
