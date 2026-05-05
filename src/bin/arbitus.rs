@@ -36,7 +36,7 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 
 use rusqlite::{Connection, types::Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -125,7 +125,59 @@ enum Command {
         #[arg(long, default_value = "100")]
         limit: usize,
     },
+    /// List or initialize starter policy configs
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
 }
+
+#[derive(Subcommand)]
+enum PolicyCommand {
+    /// List bundled starter policies
+    List,
+    /// Write a bundled starter policy to a config file
+    Init {
+        /// Policy name, e.g. claude-code, cursor, openai-agents
+        name: String,
+
+        /// Output config path
+        #[arg(short, long, default_value = "gateway.yml")]
+        out: String,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+struct PolicyPreset {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    content: &'static str,
+}
+
+const POLICY_PRESETS: &[PolicyPreset] = &[
+    PolicyPreset {
+        name: "claude-code",
+        aliases: &["claude", "claude-code-readonly"],
+        description: "Claude Code read-only MCP access with secret blocking",
+        content: include_str!("../../examples/policies/claude-code-readonly.yml"),
+    },
+    PolicyPreset {
+        name: "cursor",
+        aliases: &["cursor-dev"],
+        description: "Cursor dev workflow with HITL for edits and shadowed command tools",
+        content: include_str!("../../examples/policies/cursor-dev.yml"),
+    },
+    PolicyPreset {
+        name: "openai-agents",
+        aliases: &["openai", "openai-agent", "openai-agents-safe"],
+        description: "OpenAI Agents SDK read-oriented MCP access with strict defaults",
+        content: include_str!("../../examples/policies/openai-agents-safe.yml"),
+    },
+];
 
 // ── Entry point ────────────────────────────────────────────────────────────────
 
@@ -142,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
                     | "validate"
                     | "audit"
                     | "replay"
+                    | "policy"
                     | "verify-log"
                     | "--help"
                     | "-h"
@@ -177,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
                 dry_run,
                 limit,
             } => cmd_replay(db, agent, since, upstream, dry_run, limit).await,
+            Command::Policy { command } => cmd_policy(command),
         };
     };
 
@@ -611,6 +665,52 @@ fn cmd_validate(config_path: String) -> anyhow::Result<()> {
         }
         anyhow::bail!("{} error(s) found in {config_path}", errors.len())
     }
+}
+
+// ── policy ────────────────────────────────────────────────────────────────────
+
+fn cmd_policy(command: PolicyCommand) -> anyhow::Result<()> {
+    match command {
+        PolicyCommand::List => {
+            println!("\n{:<18} DESCRIPTION", "POLICY");
+            println!("{}", "─".repeat(88));
+            for preset in POLICY_PRESETS {
+                println!("{:<18} {}", preset.name, preset.description);
+            }
+            println!("\nUse `arbitus policy init <policy> --out gateway.yml` to create a config.");
+            Ok(())
+        }
+        PolicyCommand::Init { name, out, force } => {
+            let preset = find_policy_preset(&name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown policy '{name}'. Run `arbitus policy list` to see available policies"
+                )
+            })?;
+
+            // Keep bundled policies honest: if this ever fails, the release should fail too.
+            Config::from_yaml_str(preset.content)
+                .map_err(|e| anyhow::anyhow!("bundled policy '{}' is invalid: {e}", preset.name))?;
+
+            let out_path = Path::new(&out);
+            if out_path.exists() && !force {
+                anyhow::bail!(
+                    "{} already exists. Use --force to overwrite it",
+                    out_path.display()
+                );
+            }
+
+            std::fs::write(out_path, preset.content)
+                .map_err(|e| anyhow::anyhow!("could not write '{}': {}", out_path.display(), e))?;
+            println!("✓ wrote {} policy to {}", preset.name, out_path.display());
+            Ok(())
+        }
+    }
+}
+
+fn find_policy_preset(name: &str) -> Option<&'static PolicyPreset> {
+    POLICY_PRESETS
+        .iter()
+        .find(|preset| preset.name == name || preset.aliases.contains(&name))
 }
 
 // ── verify-log ─────────────────────────────────────────────────────────────────
@@ -1075,6 +1175,29 @@ audits: []
         let mut f = NamedTempFile::new().unwrap();
         write!(f, "this: is: not: valid: yaml: [[[").unwrap();
         f
+    }
+
+    #[test]
+    fn bundled_policy_presets_are_valid() {
+        for preset in POLICY_PRESETS {
+            Config::from_yaml_str(preset.content)
+                .unwrap_or_else(|e| panic!("{} policy should be valid: {e}", preset.name));
+        }
+    }
+
+    #[test]
+    fn policy_lookup_supports_aliases() {
+        assert_eq!(
+            find_policy_preset("claude-code").unwrap().name,
+            "claude-code"
+        );
+        assert_eq!(find_policy_preset("claude").unwrap().name, "claude-code");
+        assert_eq!(find_policy_preset("cursor-dev").unwrap().name, "cursor");
+        assert_eq!(
+            find_policy_preset("openai-agent").unwrap().name,
+            "openai-agents"
+        );
+        assert!(find_policy_preset("missing").is_none());
     }
 
     fn initial_live() -> Arc<LiveConfig> {

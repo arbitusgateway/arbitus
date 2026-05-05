@@ -1,0 +1,51 @@
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000/mcp"
+
+audit:
+  type: sqlite
+  path: "gateway-audit.db"
+
+agents:
+  cursor:
+    allowed_tools:
+      - echo
+      - read_file
+      - list_directory
+      - search_files
+      - grep
+      - write_file
+      - apply_patch
+      - edit_file
+    denied_tools:
+      - delete_file
+      - drop_table
+      - secret_dump
+    approval_required:
+      - write_file
+      - apply_patch
+      - edit_file
+    shadow_tools:
+      - "exec_*"
+      - "shell_*"
+      - "run_*"
+    rate_limit: 90
+    tool_rate_limits:
+      write_file: 10
+      apply_patch: 10
+
+default_policy:
+  allowed_tools: []
+  rate_limit: 10
+  timeout_secs: 5
+
+rules:
+  block_prompt_injection: true
+  filter_mode: redact
+  block_patterns:
+    - "(?i)(api[_-]?key|access[_-]?token|secret|password)\\s*[=:]"
+    - "Bearer\\s+[A-Za-z0-9._~+/-]+"
+    - "AKIA[0-9A-Z]{16}"
+    - "ghp_[A-Za-z0-9]{36,}"
+    - "(?i)BEGIN\\s+(RSA\\s+|EC\\s+|OPENSSH\\s+)?PRIVATE\\s+KEY"

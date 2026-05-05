@@ -4,10 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/arbitusgateway/arbitus/actions/workflows/ci.yml/badge.svg)](https://github.com/arbitusgateway/arbitus/actions/workflows/ci.yml)
 
-A security proxy that sits between AI agents and MCP servers. It enforces per-agent policies before any tool call reaches the upstream server.
+Open-source firewall for MCP tool calls. Arbitus sits between AI agents and MCP servers, then blocks secret leaks, dangerous tools, runaway loops, and unapproved actions before requests reach upstream.
 
 ```
-Agent (Cursor, Claude, etc.)
+Agent (Claude Code, Cursor, OpenAI Agents SDK, etc.)
         │  JSON-RPC
         ▼
       arbitus     ← auth, rate limit, HITL, payload filter, audit
@@ -15,6 +15,29 @@ Agent (Cursor, Claude, etc.)
         ▼
   MCP Server (filesystem, database, APIs...)
 ```
+
+Use it when you want developers to keep using AI agents without giving every agent unrestricted access to your filesystem, databases, internal APIs, or production tools.
+
+![Arbitus blocks secret exfiltration](docs/assets/secret-leak-demo.gif)
+
+## Why teams use it
+
+- **Stop secret exfiltration** — block or redact `.env` values, API keys, private keys, bearer tokens, and encoded variants before they leave the agent runtime
+- **Constrain agent tools** — expose only approved tools through `tools/list`, then enforce the same policy on `tools/call`
+- **Control blast radius** — rate-limit agents per minute, per tool, and per IP so loops do not become budget or infrastructure incidents
+- **Approve risky actions** — require Human-in-the-Loop approval before writes, deletes, deploys, database mutations, or shell-like tools run
+- **Keep an audit trail** — record every decision with request IDs and send events to SQLite, webhooks, CloudEvents, OpenLineage, Prometheus, or OTLP backends
+
+## Threats Arbitus blocks
+
+| Threat | Example | Arbitus control |
+|--------|---------|-----------------|
+| Secret exfiltration | An agent sends `.env`, API keys, bearer tokens, or private keys through `tools/call` arguments | Encoding-aware payload filtering with `block` or `redact` mode |
+| Hidden dangerous tools | An agent guesses `delete_file`, `exec_shell`, or `drop_table` even if the tool was hidden from discovery | `tools/list` filtering plus enforced allowlists/denylists on `tools/call` |
+| Prompt-injection payloads | Retrieved content tells the agent to ignore instructions or call another tool | Built-in prompt-injection patterns and response filtering |
+| Runaway loops | A tool-calling loop burns budget or hammers an internal service | Per-agent, per-tool, and per-IP rate limits |
+| Risky production actions | An agent tries to deploy, delete, mutate data, or run command-like tools | Human-in-the-Loop approval, shadow mode, and OPA/Rego policy checks |
+| Unreviewable agent behavior | Security teams cannot reconstruct who called what and why it was allowed or blocked | Request IDs, audit logs, CloudEvents, OpenLineage, Prometheus, and OTLP traces |
 
 ## What it does
 
@@ -56,6 +79,22 @@ Agent (Cursor, Claude, etc.)
 | **[Audit](docs/audit.md)** | Audit backends (SQLite, webhook, stdout), CloudEvents 1.0, OpenLineage, audit CLI |
 | **[Observability](docs/observability.md)** | Prometheus metrics, cost/token estimation, health check, dashboard, config hot-reload, OpenTelemetry, logging, circuit breaker |
 | **[Architecture](docs/architecture.md)** | Middleware pipeline, trait-based design, encoding-aware filtering, test structure |
+| **[Threat model](docs/threat-model.md)** | Assets, trust boundaries, mitigated threats, residual risks, hardening checklist |
+| **[Security demo](docs/security-demo.md)** | Copy/paste walkthrough that blocks a fake `.env` exfiltration attempt |
+| **[Demo script](demo/README.md)** | Reproducible terminal demo for recording and launch assets |
+| **[Claude Code](docs/claude-code.md)** | Connect Claude Code to MCP servers through Arbitus |
+| **[Cursor](docs/cursor.md)** | Configure Cursor MCP access through Arbitus |
+| **[OpenAI Agents SDK](docs/openai-agents.md)** | Use `MCPServerStreamableHttp` with Arbitus as the policy gateway |
+
+## Starter policies
+
+The `examples/policies/` directory contains ready-to-copy configs for common agent setups:
+
+| Policy | Use case |
+|--------|----------|
+| **[claude-code-readonly.yml](examples/policies/claude-code-readonly.yml)** | Claude Code can inspect files and search, but cannot write, delete, execute, or dump secrets |
+| **[cursor-dev.yml](examples/policies/cursor-dev.yml)** | Cursor gets normal dev tools with HITL approval for writes and shadow mode for command execution |
+| **[openai-agents-safe.yml](examples/policies/openai-agents-safe.yml)** | OpenAI Agents SDK clients get read-oriented MCP access with strict rate limits and secret filtering |
 
 ## Community
 
@@ -120,6 +159,18 @@ agents:
 
 rules:
   block_patterns: ["password", "api_key", "secret"]
+```
+
+Or start from a stricter policy:
+
+```sh
+arbitus policy init claude-code --out gateway.yml
+```
+
+List all bundled starter policies:
+
+```sh
+arbitus policy list
 ```
 
 ### Run

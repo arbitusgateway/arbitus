@@ -21,17 +21,32 @@ async fn main() {
     let state = Arc::new(AppState {
         name: "dummy-server".to_string(),
     });
+    let addr = parse_addr();
 
     let app = Router::new()
         .route("/mcp", post(handle_mcp))
         .route("/mcp", get(handle_sse))
         .with_state(state);
 
-    let addr = "0.0.0.0:3000";
     println!("MCP dummy server listening on http://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+fn parse_addr() -> String {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--addr" {
+            return args
+                .next()
+                .expect("--addr requires a value like 127.0.0.1:3000");
+        }
+        if let Some(addr) = arg.strip_prefix("--addr=") {
+            return addr.to_string();
+        }
+    }
+    std::env::var("DUMMY_SERVER_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string())
 }
 
 /// SSE endpoint — accepts GET /mcp with Accept: text/event-stream.

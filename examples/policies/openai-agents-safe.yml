@@ -1,0 +1,60 @@
+transport:
+  type: http
+  addr: "0.0.0.0:4000"
+  upstream: "http://localhost:3000/mcp"
+
+audit:
+  type: sqlite
+  path: "gateway-audit.db"
+
+agents:
+  openai-agent:
+    allowed_tools:
+      - echo
+      - read_file
+      - list_directory
+      - search_files
+      - fetch
+      - query_readonly
+    denied_tools:
+      - write_file
+      - delete_file
+      - execute
+      - "exec_*"
+      - "shell_*"
+      - drop_table
+      - secret_dump
+    rate_limit: 45
+    tool_rate_limits:
+      fetch: 20
+      query_readonly: 15
+
+default_policy:
+  allowed_tools:
+    - echo
+    - read_file
+    - list_directory
+    - search_files
+    - fetch
+    - query_readonly
+  denied_tools:
+    - write_file
+    - delete_file
+    - execute
+    - "exec_*"
+    - "shell_*"
+    - drop_table
+    - secret_dump
+  rate_limit: 20
+  timeout_secs: 10
+
+rules:
+  block_prompt_injection: true
+  filter_mode: block
+  ip_rate_limit: 120
+  block_patterns:
+    - "(?i)(api[_-]?key|access[_-]?token|secret|password)\\s*[=:]"
+    - "Bearer\\s+[A-Za-z0-9._~+/-]+"
+    - "AKIA[0-9A-Z]{16}"
+    - "ghp_[A-Za-z0-9]{36,}"
+    - "(?i)BEGIN\\s+(RSA\\s+|EC\\s+|OPENSSH\\s+)?PRIVATE\\s+KEY"

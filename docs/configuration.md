@@ -6,6 +6,13 @@ The gateway is configured via a YAML file. Pass the path as the first argument, 
 cp gateway.example.yml gateway.yml
 ```
 
+Or initialize a stricter starter policy:
+
+```sh
+arbitus policy list
+arbitus policy init claude-code --out gateway.yml
+```
+
 ```yaml
 transport:
   type: http
