@@ -242,7 +242,8 @@ async fn main() -> anyhow::Result<()> {
 async fn cmd_start(config_path: String) -> anyhow::Result<()> {
     let config = load_config(&config_path).await?;
 
-    let _otel_guard = init_tracing(config.telemetry.as_ref());
+    let stdio_mode = matches!(config.transport, TransportConfig::Stdio { .. });
+    let _otel_guard = init_tracing(config.telemetry.as_ref(), stdio_mode);
 
     // Metrics is created first so audit backends can report drop events.
     let metrics = Arc::new(GatewayMetrics::new()?);
@@ -1349,7 +1350,7 @@ impl Drop for OtelGuard {
     }
 }
 
-fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
+fn init_tracing(telemetry: Option<&TelemetryConfig>, stdio: bool) -> Option<OtelGuard> {
     let filter = EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
     let json = std::env::var("LOG_FORMAT").as_deref() == Ok("json");
 
@@ -1392,10 +1393,18 @@ fn init_tracing(telemetry: Option<&TelemetryConfig>) -> Option<OtelGuard> {
         .as_ref()
         .map(opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new);
 
-    let fmt_layer = if json {
-        tracing_subscriber::fmt::layer().json().boxed()
-    } else {
-        tracing_subscriber::fmt::layer().boxed()
+    // In stdio mode stdout carries the JSON-RPC stream — writing logs there
+    // corrupts the protocol. Send them to stderr instead.
+    let fmt_layer = match (json, stdio) {
+        (true, false) => tracing_subscriber::fmt::layer().json().boxed(),
+        (true, true) => tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+            .boxed(),
+        (false, false) => tracing_subscriber::fmt::layer().boxed(),
+        (false, true) => tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .boxed(),
     };
 
     tracing_subscriber::registry()
