@@ -66,9 +66,7 @@ async fn stdio_stdout_carries_only_json_rpc() {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut seen = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while let Ok(Ok(Some(line))) =
-        tokio::time::timeout_at(deadline, lines.next_line()).await
-    {
+    while let Ok(Ok(Some(line))) = tokio::time::timeout_at(deadline, lines.next_line()).await {
         if !line.trim().is_empty() {
             seen.push(line);
         }
